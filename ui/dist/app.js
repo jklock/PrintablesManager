@@ -6,6 +6,8 @@
  * with the backend via set_prefs on change.
  * ========================================================================== */
 
+import { renderMarkdown } from './js/markdown.js';
+
 /* ============================ BRIDGE ============================ */
 const Bridge = {
   async call(command, payload) {
@@ -50,14 +52,16 @@ let state = {
   remoteUsername: null,
   remoteTruncated: false,
   jobs: [],
-  history: []
+  history: [],
+  editModelId: null
 };
 
 const SLICERS = {
   prusa: ['PrusaSlicer', '/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer'],
   orca: ['OrcaSlicer', '/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer'],
   bambu: ['Bambu Studio', '/Applications/BambuStudio.app/Contents/MacOS/BambuStudio'],
-  cura: ['UltiMaker Cura', '/Applications/UltiMaker Cura.app/Contents/MacOS/UltiMaker-Cura']
+  cura: ['UltiMaker Cura', '/Applications/UltiMaker Cura.app/Contents/MacOS/UltiMaker-Cura'],
+  qidi: ['QIDISlicer', '/Applications/QIDISlicer.app/Contents/MacOS/QIDISlicer']
 };
 
 /* ============================ HELPERS ============================ */
@@ -555,18 +559,10 @@ function renderDetail() {
     const desc = m.description || '';
     if (desc.startsWith('Error:')) {
       descEl.innerHTML = `<p class="desc-error">${esc(desc)}</p>`;
-    } else if (desc) {
-      // Render markdown-like headers and paragraphs
-      const html = desc.split('\n').map(line => {
-        if (line.startsWith('## ')) return `<h4>${esc(line.slice(3))}</h4>`;
-        if (line.trim() === '') return '';
-        // Convert [text](url) links
-        const withLinks = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="desc-link" data-url="$2">$1</a>');
-        return `<p>${withLinks}</p>`;
-      }).filter(Boolean).join('');
-      descEl.innerHTML = html;
+    } else if (desc.trim()) {
+      descEl.innerHTML = renderMarkdown(desc);
     } else {
-      descEl.innerHTML = '<p class="desc-empty">No description available.</p>';
+      descEl.innerHTML = '<p class="desc-empty">No description yet — use Edit Model to add one.</p>';
     }
   }
   $('#detail-meta').innerHTML = `
@@ -1350,6 +1346,186 @@ function wireSyncSettings() {
       }
     });
   }
+
+  const slicerTest = $('#slicer-test');
+  if (slicerTest) {
+    slicerTest.addEventListener('click', async () => {
+      try {
+        const info = await Bridge.call('slicer_test', {});
+        toast(`Launched ${info.label}`, info.appBundle || info.executable || '');
+        refreshSlicerStatus();
+      } catch (err) {
+        toast('Slicer test failed', err.message || err);
+        refreshSlicerStatus();
+      }
+    });
+  }
+}
+
+/* ============================ EDIT MODEL ============================ */
+function editModel() {
+  return state.models.find(x => x.id === state.editModelId) || null;
+}
+
+function openEditModal() {
+  const m = currentModel();
+  const modal = $('#edit-modal');
+  if (!m || !modal) return;
+
+  state.editModelId = m.id;
+  $('#edit-name').value = m.name || '';
+  $('#edit-tags').value = (m.tags || []).join(', ');
+  $('#edit-description').value = m.description || '';
+  const status = $('#edit-status');
+  status.textContent = '';
+  status.classList.remove('is-error');
+
+  updateEditPreview();
+  renderEditFiles();
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => $('#edit-name').focus());
+}
+
+function updateEditPreview() {
+  const preview = $('#edit-preview');
+  const input = $('#edit-description');
+  if (!preview || !input) return;
+  const html = renderMarkdown(input.value);
+  preview.innerHTML = html || '<p class="desc-empty">Nothing yet.</p>';
+}
+
+function renderEditFiles() {
+  const list = $('#edit-file-list');
+  const m = editModel();
+  if (!list || !m) return;
+
+  if (!(m.files || []).length) {
+    list.innerHTML = '<li class="edit-file-empty">No files yet — add some.</li>';
+    return;
+  }
+
+  list.innerHTML = m.files.map(f => `
+    <li class="edit-file-row">
+      <span class="edit-file-name mono">${esc(f.n)}</span>
+      <span class="edit-file-size">${fmtMB(f.mb)}</span>
+      <button class="btn btn-ghost btn-sm btn-danger" data-remove-file="${esc(f.n)}" type="button">Remove</button>
+    </li>`).join('');
+}
+
+async function actEditSave() {
+  const m = editModel();
+  if (!m) return;
+  const status = $('#edit-status');
+  const name = $('#edit-name').value.trim();
+  const description = $('#edit-description').value;
+  const tags = $('#edit-tags').value.split(',').map(t => t.trim()).filter(Boolean);
+
+  if (!name) {
+    status.textContent = 'A model needs a name.';
+    status.classList.add('is-error');
+    return;
+  }
+
+  status.classList.remove('is-error');
+  status.textContent = 'Saving…';
+  try {
+    await Bridge.call('update_model_details', { modelId: m.id, name, description, tags });
+    await refreshLibrary();
+    state.detailId = m.id;
+    renderDetail();
+    loadHistory();
+    $('#edit-modal').classList.add('hidden');
+    toast('Model saved', 'Committed to git');
+  } catch (err) {
+    status.textContent = err.message || String(err);
+    status.classList.add('is-error');
+  }
+}
+
+async function actAddFiles() {
+  const m = editModel();
+  if (!m) return;
+  const status = $('#edit-status');
+  try {
+    status.classList.remove('is-error');
+    status.textContent = 'Choose files…';
+    const result = await Bridge.call('import_model_files', { modelId: m.id }) || {};
+    const imported = result.imported || [];
+    const skipped = result.skipped || [];
+
+    await refreshLibrary();
+    renderEditFiles();
+    loadHistory();
+
+    status.classList.toggle('is-error', imported.length === 0);
+    status.textContent = imported.length
+      ? `Added ${imported.length} file(s)${skipped.length ? `, ${skipped.length} skipped` : ''}.`
+      : (skipped.length ? `Nothing added. ${skipped.join('; ')}` : 'No files chosen.');
+    if (imported.length) toast('Files added', imported.join(', '));
+  } catch (err) {
+    status.textContent = err.message || String(err);
+    status.classList.add('is-error');
+  }
+}
+
+async function actRemoveFile(name) {
+  const m = editModel();
+  if (!m) return;
+  if (!confirm(`Remove "${name}" from this model?\n\nIt is deleted from disk and the change is committed.`)) return;
+
+  try {
+    await Bridge.call('delete_model_file', { modelId: m.id, name });
+    await refreshLibrary();
+    renderEditFiles();
+    loadHistory();
+    toast('File removed', name);
+  } catch (err) {
+    toast('Cannot remove file', err.message || err);
+  }
+}
+
+function wireEditModal() {
+  const modal = $('#edit-modal');
+  if (!modal) return;
+
+  const close = () => modal.classList.add('hidden');
+  $('#edit-cancel').addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+
+  $('#edit-description').addEventListener('input', updateEditPreview);
+  $('#edit-save').addEventListener('click', actEditSave);
+  $('#edit-add-files').addEventListener('click', actAddFiles);
+  $('#edit-file-list').addEventListener('click', e => {
+    const btn = e.target.closest('[data-remove-file]');
+    if (btn) actRemoveFile(btn.dataset.removeFile);
+  });
+  $('#edit-preview').addEventListener('click', e => {
+    const link = e.target.closest('a');
+    if (link) {
+      e.preventDefault();
+      actOpenExternal(link.getAttribute('href'));
+    }
+  });
+}
+
+/* ============================ SLICER STATUS ============================ */
+async function refreshSlicerStatus() {
+  const el = $('#slicer-status');
+  if (!el) return;
+  try {
+    const info = await Bridge.call('slicer_info', {});
+    if (!info || !info.executable) {
+      el.textContent = 'No slicer configured.';
+      el.classList.remove('is-warning');
+      return;
+    }
+    el.textContent = info.exists
+      ? `${info.label} — found at ${info.appBundle || info.executable}`
+      : `${info.label} — not installed at ${info.executable}`;
+    el.classList.toggle('is-warning', !info.exists);
+  } catch (err) {
+    el.textContent = err.message || 'Could not check the slicer.';
+  }
 }
 
 /* ============================ MODAL PROMPT ============================ */
@@ -1556,6 +1732,7 @@ $('#detail-files').addEventListener('click', e => {
   const b = e.target.closest('.file-slice');
   if (b) actSliceFile(b.dataset.file);
 });
+$('#act-edit').addEventListener('click', openEditModal);
 $('#act-slicer').addEventListener('click', () => actOpenInSlicer(state.models.find(m => m.id === state.detailId)));
 $('#act-export').addEventListener('click', () => actExport(state.models.find(m => m.id === state.detailId)));
 $('#act-folder').addEventListener('click', () => actFolder(state.models.find(m => m.id === state.detailId)));
@@ -1567,10 +1744,10 @@ $('#detail-meta').addEventListener('click', e => {
   }
 });
 $('#detail-description').addEventListener('click', e => {
-  const link = e.target.closest('.desc-link');
+  const link = e.target.closest('a');
   if (link) {
     e.preventDefault();
-    actOpenExternal(link.dataset.url);
+    actOpenExternal(link.getAttribute('href'));
   }
 });
 
@@ -1628,6 +1805,7 @@ $('#slicer-select').addEventListener('change', e => {
   const defaultPath = SLICERS[state.prefs.slicer_key]?.[1] || null;
   state.prefs.slicer_executable = defaultPath;
   Bridge.call('set_prefs', { slicer_key: state.prefs.slicer_key, slicer_executable: defaultPath }).catch(() => {});
+  refreshSlicerStatus();
   toast(`Default slicer set to ${slicerName()}`, 'synced to backend');
 });
 
@@ -1787,9 +1965,11 @@ async function init() {
 
   wireSyncSettings();
   wireLoginModal();
+  wireEditModal();
   applySyncSettingsUI();
   await refreshAuth();
   showCapabilities();
+  refreshSlicerStatus();
   await wireBackendEvents();
 
   await refreshLibrary();
@@ -1804,6 +1984,10 @@ async function init() {
   if (state.prefs.auto_sync_on_launch && authSignedIn()) {
     refreshRemoteModels().then(actSyncAll);
   }
+
+  // Opaque module scope is great for safety and terrible for debugging: expose
+  // a tiny read/write surface so the UI can be driven from a browser harness.
+  window.__pm = { state, showView, openDetail, openEditModal, renderLibrary, refreshLibrary };
 
   console.info('%cPrintables Manager%c — Tauri IPC active.', 'font-weight:700;color:#FF5701', '');
 }

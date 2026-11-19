@@ -142,19 +142,48 @@ pub struct AuthStatus {
 
 pub struct AuthState {
     session: Mutex<Option<StoredSession>>,
+    /// Set once the Keychain has been consulted. Reading the Keychain can show
+    /// a system permission dialog, so it must never happen while the main
+    /// window is being created — otherwise the app looks like it never starts.
+    loaded: std::sync::atomic::AtomicBool,
     pub login_running: Mutex<bool>,
 }
 
 impl AuthState {
     pub fn new() -> Self {
-        let session = load_session().ok().flatten();
         Self {
-            session: Mutex::new(session),
+            session: Mutex::new(None),
+            loaded: std::sync::atomic::AtomicBool::new(false),
             login_running: Mutex::new(false),
         }
     }
 
+    /// Load the stored session the first time it is actually needed.
+    fn ensure_loaded(&self) {
+        use std::sync::atomic::Ordering;
+        if self.loaded.load(Ordering::Acquire) {
+            return;
+        }
+        // Whoever gets here first does the (possibly prompting) read; the
+        // others wait until it finishes.
+        if self
+            .loaded
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if let Ok(Some(session)) = load_session() {
+            if let Ok(mut guard) = self.session.lock() {
+                *guard = Some(session);
+            }
+        }
+        // Release so concurrent callers see the fully populated slot.
+        self.loaded.store(true, Ordering::Release);
+    }
+
     pub fn status(&self) -> AuthStatus {
+        self.ensure_loaded();
         let guard = match self.session.lock() {
             Ok(g) => g,
             Err(_) => return AuthStatus::default(),
@@ -180,6 +209,7 @@ impl AuthState {
 
     /// A usable token, refreshing once when it has expired.
     pub fn token(&self) -> Option<String> {
+        self.ensure_loaded();
         let expired = {
             let guard = self.session.lock().ok()?;
             guard.as_ref().map(|s| s.is_expired()).unwrap_or(false)
@@ -196,6 +226,8 @@ impl AuthState {
 
     pub fn set(&self, session: StoredSession) -> AppResult<()> {
         save_session(&session)?;
+        self.loaded
+            .store(true, std::sync::atomic::Ordering::Release);
         let mut guard = self
             .session
             .lock()
@@ -206,6 +238,8 @@ impl AuthState {
 
     pub fn clear(&self) -> AppResult<()> {
         delete_session();
+        self.loaded
+            .store(true, std::sync::atomic::Ordering::Release);
         let mut guard = self
             .session
             .lock()
@@ -214,9 +248,11 @@ impl AuthState {
         Ok(())
     }
 
-    /// Called once at startup: silently renews an expired session from the
-    /// refresh token kept in the Keychain, so a signed-in user stays signed in.
+    /// Called once at startup, from a background thread, so a Keychain prompt
+    /// never delays the window. Renews an expired session from the refresh
+    /// token kept in the Keychain, so a signed-in user stays signed in.
     pub fn restore(&self) -> AuthStatus {
+        self.ensure_loaded();
         let current = self.status();
         if !current.signed_in && current.can_refresh {
             let _ = self.refresh();

@@ -13,6 +13,76 @@ mod sync;
 // Diagnostics (`examples/keychain_check.rs`) reach into the real session code.
 pub mod auth;
 
+/// `Printables Manager --selftest`: prints what the app can actually do on this
+/// machine. Used for support and for verifying a freshly installed bundle.
+pub fn selftest() {
+    println!(
+        "Printables Manager {} — selftest",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let report = auth::keychain_selftest();
+    println!(
+        "keychain     : available={} writable={} readable={}{}",
+        report.available,
+        report.writable,
+        report.readable,
+        match &report.error {
+            Some(err) => format!("  ({err})"),
+            None => String::new(),
+        }
+    );
+
+    match config::prefs_path() {
+        Ok(path) => println!("preferences  : {}", path.display()),
+        Err(err) => println!("preferences  : unavailable ({})", err.message),
+    }
+
+    let prefs = config::load_prefs().unwrap_or_default();
+    println!(
+        "library      : {}",
+        prefs
+            .library_folder
+            .clone()
+            .unwrap_or_else(|| "(not set)".to_string())
+    );
+    println!("git enabled  : {}", prefs.git_enabled);
+
+    // Reading the session can raise a Keychain permission dialog, so it is opt-in:
+    //   printables-manager --selftest --with-session
+    if std::env::args().any(|arg| arg == "--with-session") {
+        let state = auth::AuthState::new();
+        let status = state.status();
+        println!(
+            "session      : signed_in={} user={} storage={} refreshable={}",
+            status.signed_in,
+            status.username.clone().unwrap_or_else(|| "-".to_string()),
+            status.storage.clone().unwrap_or_else(|| "-".to_string()),
+            status.can_refresh
+        );
+    } else {
+        println!("session      : not read (pass --with-session to include it)");
+    }
+
+    let slicer = commands::slicer::inspect(&prefs);
+    println!(
+        "slicer       : {} -> {} (exists={})",
+        slicer.label,
+        slicer
+            .app_bundle
+            .clone()
+            .or(slicer.executable.clone())
+            .unwrap_or_else(|| "(not configured)".to_string()),
+        slicer.exists
+    );
+
+    if report.healthy() {
+        println!("\nOK: this build may store the session in the login Keychain.");
+    } else {
+        println!("\nWARNING: the Keychain is not usable; sessions fall back to a 0600 file.");
+    }
+}
+
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -48,10 +118,18 @@ pub fn run() {
             commands::dialogs::dialog_open,
             commands::slicer::open_in_slicer,
             commands::slicer::slice_file,
+            commands::slicer::slicer_info,
+            commands::slicer::slicer_test,
             commands::maintenance::rebuild_thumbs,
             commands::export::export_files,
             commands::shell::open_folder,
             commands::shell::open_external,
+            // editing
+            commands::edit::get_model_edit,
+            commands::edit::update_model_details,
+            commands::edit::import_model_files,
+            commands::edit::delete_model_file,
+            commands::edit::set_model_cover,
             // account
             commands::auth::auth_status,
             commands::auth::auth_login,

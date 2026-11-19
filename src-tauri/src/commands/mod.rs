@@ -3,6 +3,7 @@ pub mod clone;
 pub mod collections;
 pub mod delete;
 pub mod dialogs;
+pub mod edit;
 pub mod export;
 pub mod git;
 pub mod library;

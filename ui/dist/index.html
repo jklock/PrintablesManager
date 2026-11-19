@@ -135,12 +135,14 @@
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="m10 8 6 4-6 4V8z"></path></svg>
                   Open in Slicer
                 </button>
-                <button class="btn btn-secondary" id="act-export" data-od-id="path-0-1-1-1-0-1-2-1">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                <button class="btn btn-secondary" id="act-export" data-od-id="path-0-1-1-1-0-1-2-1">                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                   Export / Save Files As…
                 </button>
-                <button class="btn btn-ghost" id="act-folder" data-od-id="path-0-1-1-1-0-1-2-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                <button class="btn btn-secondary" id="act-edit">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                  Edit Model
+                </button>
+                <button class="btn btn-ghost" id="act-folder" data-od-id="path-0-1-1-1-0-1-2-2">                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
                   Open Local Folder
                 </button>
                 <div class="collection-btn-wrap">
@@ -261,6 +263,7 @@
                     <option value="orca">OrcaSlicer</option>
                     <option value="bambu">Bambu Studio</option>
                     <option value="cura">UltiMaker Cura</option>
+                    <option value="qidi">QIDISlicer</option>
                   </select>
                 </div>
               </div>
@@ -269,6 +272,12 @@
                 <div class="setting-control">
                   <input type="text" id="slicer-path" readonly="" data-od-id="path-0-1-1-3-0-1-3-1-0">
                   <button class="btn btn-secondary btn-sm" id="slicer-browse" data-od-id="path-0-1-1-3-0-1-3-1-1">Browse…</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Status</div><div class="setting-hint" id="slicer-status">Checking…</div></div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary btn-sm" id="slicer-test">Test slicer</button>
                 </div>
               </div>
             </div>
@@ -405,6 +414,42 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <div class="modal-overlay hidden" id="edit-modal" role="dialog" aria-modal="true" aria-label="Edit model">
+    <div class="modal-card edit-modal-card">
+      <h3>Edit model</h3>
+      <label class="edit-field">
+        <span>Name</span>
+        <input type="text" id="edit-name" autocomplete="off" spellcheck="false" />
+      </label>
+      <label class="edit-field">
+        <span>Tags <em>comma separated</em></span>
+        <input type="text" id="edit-tags" autocomplete="off" spellcheck="false" placeholder="vase, planter, petg" />
+      </label>
+      <div class="edit-split">
+        <label class="edit-field">
+          <span>Description <em>Markdown</em></span>
+          <textarea id="edit-description" rows="12" spellcheck="true" placeholder="## Print settings&#10;- Layer height: 0.2 mm&#10;- **Supports:** no"></textarea>
+        </label>
+        <div class="edit-field">
+          <span>Preview</span>
+          <div class="edit-preview" id="edit-preview"></div>
+        </div>
+      </div>
+      <div class="edit-files">
+        <div class="edit-files-head">
+          <span>Files</span>
+          <button class="btn btn-secondary btn-sm" id="edit-add-files" type="button">Add files…</button>
+        </div>
+        <ul class="edit-file-list" id="edit-file-list"></ul>
+      </div>
+      <div class="login-status" id="edit-status"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="edit-cancel" type="button">Cancel</button>
+        <button class="btn btn-primary" id="edit-save" type="button">Save &amp; commit</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
 </body>
 </html>

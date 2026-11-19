@@ -103,7 +103,7 @@ pub fn image_extension_from_url(url: &str) -> String {
     }
 }
 
-fn kind_from_extension(name: &str) -> String {
+pub fn kind_for_name(name: &str) -> String {
     match name
         .rsplit('.')
         .next()
@@ -307,7 +307,7 @@ where
             let size = path.metadata().map(|m| m.len()).unwrap_or(0);
             downloaded.push(MetadataFile {
                 name: name.clone(),
-                kind: kind_from_extension(&name),
+                kind: kind_for_name(&name),
                 size_bytes: size,
                 local_path: format!("files/{name}"),
                 remote_id: None,
@@ -541,10 +541,10 @@ mod tests {
 
     #[test]
     fn extension_maps_to_printables_kind() {
-        assert_eq!(kind_from_extension("a.stl"), "stl");
-        assert_eq!(kind_from_extension("b.gcode"), "gcode");
-        assert_eq!(kind_from_extension("c.SL1"), "sla");
-        assert_eq!(kind_from_extension("readme.txt"), "other");
+        assert_eq!(kind_for_name("a.stl"), "stl");
+        assert_eq!(kind_for_name("b.gcode"), "gcode");
+        assert_eq!(kind_for_name("c.SL1"), "sla");
+        assert_eq!(kind_for_name("readme.txt"), "other");
     }
 
     #[test]
