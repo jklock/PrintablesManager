@@ -147,6 +147,7 @@ const ICONS = {
   back: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
   download: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
   layers: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>',
+  upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
   check: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
   pencil: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
   trash: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>'
@@ -597,6 +598,21 @@ function renderDetail() {
       descEl.innerHTML = '<p class="desc-empty">No description yet — use Edit Model to add one.</p>';
     }
   }
+  const publishBtn = $('#act-publish');
+  if (publishBtn) {
+    const onSite = /^\d+$/.test(m.id);
+    publishBtn.innerHTML = onSite
+      ? `${ICONS.upload}Update on Printables`
+      : `${ICONS.upload}Publish to Printables`;
+    publishBtn.classList.toggle('btn-primary', !onSite);
+    publishBtn.classList.toggle('btn-secondary', onSite);
+    publishBtn.title = onSite
+      ? 'Upload the current files and details to this model on printables.com'
+      : 'Create this model on printables.com as a draft';
+  }
+  const deleteRemote = $('#act-delete-remote');
+  if (deleteRemote) deleteRemote.classList.toggle('hidden', !/^\d+$/.test(m.id));
+
   $('#detail-meta').innerHTML = `
     <dt>Total size</dt><dd class="mono">${fmtMB(modelSize(m))} · ${(m.files || []).length} file${(m.files || []).length > 1 ? 's' : ''}</dd>
     <dt>Added</dt><dd>${fmtDate(m.added)}</dd>
@@ -1457,12 +1473,23 @@ function renderEditFiles() {
     return;
   }
 
-  list.innerHTML = m.files.map(f => `
+  const fileRows = m.files.map(f => `
     <li class="edit-file-row">
       <span class="edit-file-name mono">${esc(f.n)}</span>
       <span class="edit-file-size">${fmtMB(f.mb)}</span>
       <button class="btn btn-ghost btn-sm btn-danger" data-remove-file="${esc(f.n)}" type="button">Remove</button>
-    </li>`).join('');
+    </li>`);
+
+  const imageRows = (m.images || []).map(img => `
+    <li class="edit-file-row">
+      <span class="edit-file-name mono">${esc(img.name)}</span>
+      <span class="edit-file-size">${img.kind === 'cover' ? '<strong>cover</strong>' : esc(img.kind || 'photo')}</span>
+      ${img.kind === 'cover'
+        ? ''
+        : `<button class="btn btn-ghost btn-sm" data-cover="${esc(img.name)}" type="button">Use as cover</button>`}
+    </li>`);
+
+  list.innerHTML = [...fileRows, ...imageRows].join('');
 }
 
 async function actEditSave() {
@@ -1521,6 +1548,20 @@ async function actAddFiles() {
   }
 }
 
+async function actSetCover(name) {
+  const m = editModel();
+  if (!m) return;
+  try {
+    await Bridge.call('set_model_cover', { modelId: m.id, name });
+    await refreshLibrary();
+    renderEditFiles();
+    loadHistory();
+    toast('Cover updated', name);
+  } catch (err) {
+    toast('Could not set cover', err.message || err);
+  }
+}
+
 async function actRemoveFile(name) {
   const m = editModel();
   if (!m) return;
@@ -1549,8 +1590,10 @@ function wireEditModal() {
   $('#edit-save').addEventListener('click', actEditSave);
   $('#edit-add-files').addEventListener('click', actAddFiles);
   $('#edit-file-list').addEventListener('click', e => {
-    const btn = e.target.closest('[data-remove-file]');
-    if (btn) actRemoveFile(btn.dataset.removeFile);
+    const remove = e.target.closest('[data-remove-file]');
+    if (remove) { actRemoveFile(remove.dataset.removeFile); return; }
+    const cover = e.target.closest('[data-cover]');
+    if (cover) actSetCover(cover.dataset.cover);
   });
   $('#edit-preview').addEventListener('click', e => {
     const link = e.target.closest('a');

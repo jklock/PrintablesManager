@@ -161,6 +161,7 @@
                 <button class="btn btn-ghost btn-danger" id="act-delete-remote" title="Delete this model on printables.com">
                   Delete on Printables
                 </button>
+                <div class="actions-divider"><span>Local</span></div>
                 <button class="btn btn-ghost btn-danger" id="act-delete" data-od-id="path-0-1-1-1-0-1-2-3">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                   Delete Model
@@ -196,7 +197,7 @@
                   <button class="btn btn-primary clone-btn" type="submit" id="clone-submit" data-od-id="path-0-1-1-2-0-0-1-0-1">Clone Model</button>
                 </div>
                 <div class="form-error hidden" id="clone-error" data-od-id="path-0-1-1-2-0-0-1-1"></div>
-                <div class="form-note hidden" id="clone-note" data-od-id="path-0-1-1-2-0-0-1-2">Not a printables.com model URL — the backend will attempt to clone it anyway.</div>
+                <div class="form-note hidden" id="clone-note" data-od-id="path-0-1-1-2-0-0-1-2">That does not look like a printables.com model URL (…/model/&lt;id&gt;).</div>
               </form>
               <div class="clone-progress hidden" id="clone-progress" data-od-id="path-0-1-1-2-0-0-2">
                 <div class="clone-status" data-od-id="path-0-1-1-2-0-0-2-0"><span class="step" id="clone-step" data-od-id="path-0-1-1-2-0-0-2-0-0">Fetching model metadata…</span><span class="pct" id="clone-pct" data-od-id="path-0-1-1-2-0-0-2-0-1"></span></div>
@@ -343,7 +344,7 @@
                 <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-remote-write" /><span></span></label></div>
               </div>
               <div class="setting-row">
-                <div><div class="setting-label">Publishing</div><div class="setting-hint" id="capability-hint">Model files and details can be pushed. Image uploads are not supported.</div></div>
+                <div><div class="setting-label">Publishing</div><div class="setting-hint" id="capability-hint">Model files, images, name, description and tags can be published. Off by default.</div></div>
                 <div class="setting-control">
                   <button class="btn btn-secondary btn-sm" id="auth-refresh-btn">Refresh session</button>
                   <button class="btn btn-ghost btn-sm" id="auth-token-btn">Add token manually</button>
