@@ -77,6 +77,8 @@ pub fn create_collection(
         model_ids: Vec::new(),
         created_at: now.clone(),
         updated_at: now,
+        site_id: None,
+        site_count: None,
     };
     data.collections.push(collection.clone());
     save_collections(&lib_dir, &data)?;
@@ -194,4 +196,134 @@ pub fn remove_model_from_collection(
 
     save_collections(&lib_dir, &data)?;
     Ok(result)
+}
+
+/// Merge the account's printables.com collections into collections.json.
+///
+/// Ids are namespaced `site-<id>` so a site collection and a local one can
+/// never collide, and re-running preserves any local membership and ordering.
+pub fn upsert_site_collections(
+    data: &mut CollectionsFile,
+    site: &[crate::printables::api::SiteCollection],
+) -> usize {
+    let now = now_iso();
+    let mut changed = 0;
+
+    for remote in site {
+        let key = format!("site-{}", remote.id);
+        match data.collections.iter_mut().find(|c| c.id == key) {
+            Some(existing) => {
+                let count_changed = existing.site_count != Some(remote.prints_count);
+                if existing.name != remote.name || count_changed {
+                    existing.name = remote.name.clone();
+                    existing.site_count = Some(remote.prints_count);
+                    existing.updated_at = now.clone();
+                    changed += 1;
+                }
+            }
+            None => {
+                data.collections.push(Collection {
+                    id: key,
+                    name: remote.name.clone(),
+                    model_ids: Vec::new(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    site_id: Some(remote.id.clone()),
+                    site_count: Some(remote.prints_count),
+                });
+                changed += 1;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Pull the collections that exist on printables.com into the sidebar.
+#[tauri::command]
+pub fn import_site_collections(
+    prefs: State<'_, Mutex<AppPrefs>>,
+    auth: State<'_, crate::auth::AuthState>,
+) -> Result<Vec<Collection>, String> {
+    let snapshot = prefs.lock().map(|p| p.clone()).map_err(|e| e.to_string())?;
+    let lib_dir = library_dir(&snapshot)?;
+
+    let token = auth
+        .token()
+        .ok_or_else(|| "Sign in to Printables to import your collections.".to_string())?;
+    let client =
+        crate::printables::api::PrintablesClient::with_token(Some(token)).map_err(|e| e.message)?;
+    let account = client
+        .viewer()
+        .map_err(|e| e.message)?
+        .id
+        .ok_or_else(|| "Printables did not report an account id.".to_string())?;
+
+    let site = client.user_collections(&account).map_err(|e| e.message)?;
+
+    let mut data = load_collections(&lib_dir);
+    upsert_site_collections(&mut data, &site);
+    save_collections(&lib_dir, &data)?;
+    Ok(data.collections)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::printables::api::SiteCollection;
+
+    fn site(id: &str, name: &str, count: u32) -> SiteCollection {
+        SiteCollection {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            prints_count: count,
+        }
+    }
+
+    #[test]
+    fn site_collections_are_imported_once_and_updated_after() {
+        let mut data = CollectionsFile::default();
+        assert_eq!(
+            upsert_site_collections(&mut data, &[site("1", "Glock", 12)]),
+            1
+        );
+        assert_eq!(data.collections.len(), 1);
+        assert_eq!(data.collections[0].id, "site-1");
+        assert_eq!(data.collections[0].site_count, Some(12));
+
+        // Second run with the same data changes nothing.
+        assert_eq!(
+            upsert_site_collections(&mut data, &[site("1", "Glock", 12)]),
+            0
+        );
+
+        // Rename/count change updates in place.
+        assert_eq!(
+            upsert_site_collections(&mut data, &[site("1", "Glock 17", 13)]),
+            1
+        );
+        assert_eq!(data.collections.len(), 1);
+        assert_eq!(data.collections[0].name, "Glock 17");
+        assert_eq!(data.collections[0].site_count, Some(13));
+    }
+
+    #[test]
+    fn importing_never_clobbers_local_collections() {
+        let mut data = CollectionsFile {
+            schema_version: 1,
+            collections: vec![Collection {
+                id: "local-uuid".into(),
+                name: "Mine".into(),
+                model_ids: vec!["42".into()],
+                created_at: "x".into(),
+                updated_at: "x".into(),
+                site_id: None,
+                site_count: None,
+            }],
+        };
+        upsert_site_collections(&mut data, &[site("9", "Reloading", 4)]);
+        assert_eq!(data.collections.len(), 2);
+        assert_eq!(data.collections[0].model_ids, vec!["42".to_string()]);
+    }
 }

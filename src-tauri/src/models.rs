@@ -142,6 +142,12 @@ pub struct Collection {
     pub model_ids: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// printables.com collection id, when this mirrors a site collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
+    /// How many models the site says the collection holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_count: Option<u32>,
 }
 
 /// Root shape of `<library_folder>/collections.json`.

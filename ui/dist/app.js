@@ -311,7 +311,7 @@ function renderSidebarCollections() {
     <div class="collection-nav-item ${state.view === 'library' && state.activeCollectionId === c.id ? 'is-active' : ''}" data-collection="${c.id}" tabindex="0" role="button" aria-label="Open collection ${esc(c.name)}">
       ${collectionCollageHTML(c)}
       <span class="collection-name">${esc(c.name)}</span>
-      <span class="nav-count">${(c.model_ids || []).length}</span>
+      <span class="nav-count">${(c.model_ids || []).length || (c.site_count || 0)}</span>
       <span class="collection-item-actions">
         <button class="collection-icon-btn" data-action="rename" data-id="${c.id}" title="Rename collection">${ICONS.pencil}</button>
         <button class="collection-icon-btn" data-action="delete" data-id="${c.id}" title="Delete collection">${ICONS.trash}</button>
@@ -333,6 +333,38 @@ async function refreshCollections() {
   } catch (err) {
     console.warn('Failed to load collections:', err);
     state.collections = [];
+  }
+}
+
+async function actImportCollections() {
+  try {
+    toast('Importing collections…', 'from printables.com');
+    const collections = await Bridge.call('import_site_collections', {});
+    state.collections = collections || state.collections;
+    renderSidebarCollections();
+    if (state.view === 'library') renderTopbar();
+    toast('Collections imported', `${(collections || []).length} collection(s)`);
+  } catch (err) {
+    toast('Import failed', err.message || err);
+  }
+}
+
+async function actNewModel() {
+  const name = await promptText('New model name', '');
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { toast('A model needs a name'); return; }
+  try {
+    const meta = await Bridge.call('create_local_model', { name: trimmed });
+    await refreshLibrary();
+    renderLibrary();
+    state.detailId = meta.model_id;
+    renderDetail();
+    showView('detail');
+    openEditModal();
+    toast('Model created locally', 'Add files and a description, then it is ready to publish');
+  } catch (err) {
+    toast('Could not create model', err.message || err);
   }
 }
 
@@ -1620,6 +1652,8 @@ $$('.nav-item[data-view]').forEach(b => b.addEventListener('click', () => {
 
 /* collections sidebar */
 $('#btn-new-collection').addEventListener('click', actCreateCollection);
+$('#btn-import-collections').addEventListener('click', actImportCollections);
+$('#btn-new-model').addEventListener('click', actNewModel);
 $('#nav-collections').addEventListener('click', e => {
   const actionBtn = e.target.closest('.collection-icon-btn');
   if (actionBtn) {

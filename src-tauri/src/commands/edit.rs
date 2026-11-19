@@ -283,6 +283,104 @@ pub fn set_model_cover(prefs: State<'_, Mutex<AppPrefs>>, args: FileArgs) -> App
     apply_cover(&dir, &args.name)
 }
 
+/// Create a brand-new model folder in the library.
+///
+/// The model is local only: it has no printables.com counterpart until it is
+/// published, which the website itself requires an image *and* a model file
+/// for (`modelUpdate` validates exactly that).
+pub fn create_model_in(
+    library: &Path,
+    name: &str,
+    description: &str,
+    tags: Vec<String>,
+    git_enabled: bool,
+) -> AppResult<MetadataV1> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::invalid("A new model needs a name."));
+    }
+
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = if slug.is_empty() {
+        "model".to_string()
+    } else {
+        slug
+    };
+
+    let id = format!("local-{}", uuid::Uuid::new_v4());
+    let dir = library.join(format!("{id}-{slug}"));
+    fs::create_dir_all(dir.join("files"))?;
+    fs::create_dir_all(dir.join("images"))?;
+
+    let metadata = MetadataV1 {
+        schema_version: 2,
+        // Not on printables.com yet.
+        source: "local".to_string(),
+        model_id: id,
+        slug,
+        name: name.to_string(),
+        url: String::new(),
+        author: String::new(),
+        tags: normalize_tags(tags),
+        stats: crate::models::ModelStats {
+            likes: None,
+            downloads: None,
+            rating: None,
+            published_date: None,
+        },
+        description: description.trim().to_string(),
+        remote_description_html: String::new(),
+        cloned_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        files: Vec::new(),
+        images: Vec::new(),
+    };
+
+    locator::write_metadata(&dir, &metadata)?;
+    if git_enabled {
+        git::open(&dir, true)?;
+        git::commit_all(&dir, "Created locally")?;
+    }
+    Ok(metadata)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateModelArgs {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Create a new, local-only model. Returns the fresh metadata.
+#[tauri::command]
+pub fn create_local_model(
+    prefs: State<'_, Mutex<AppPrefs>>,
+    args: CreateModelArgs,
+) -> AppResult<MetadataV1> {
+    let snapshot = prefs
+        .lock()
+        .map(|p| p.clone())
+        .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
+    let library = config::library_dir(&snapshot)?;
+    create_model_in(
+        &library,
+        &args.name,
+        &args.description,
+        args.tags,
+        snapshot.git_enabled,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +494,54 @@ mod tests {
             "exactly one cover"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn creating_a_model_makes_a_folder_metadata_and_commit() {
+        let library = std::env::temp_dir().join(format!("po-new-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&library).unwrap();
+
+        let meta = create_model_in(
+            &library,
+            "  My New Model  ",
+            "## hi",
+            vec!["a".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(meta.name, "My New Model");
+        assert_eq!(meta.source, "local");
+        assert!(meta.model_id.starts_with("local-"));
+
+        let dir = library.join(format!("{}-my-new-model", meta.model_id));
+        assert!(dir.join("metadata.json").exists());
+        assert!(dir.join("files").is_dir());
+        assert!(dir.join("images").is_dir());
+        assert!(crate::git::is_repo(&dir));
+        assert_eq!(
+            crate::git::log(&dir, 10).unwrap()[0].summary,
+            "Created locally"
+        );
+
+        // The indexer picks it up as a normal library model.
+        let index = crate::library::indexer::index_library(&library).unwrap();
+        assert_eq!(index.models.len(), 1);
+        assert_eq!(index.models[0].name, "My New Model");
+
+        let _ = fs::remove_dir_all(&library);
+    }
+
+    #[test]
+    fn a_new_model_needs_a_name() {
+        let library = std::env::temp_dir().join(format!("po-new-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&library).unwrap();
+        assert_eq!(
+            create_model_in(&library, "  ", "", vec![], false)
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+        let _ = fs::remove_dir_all(&library);
     }
 
     #[test]

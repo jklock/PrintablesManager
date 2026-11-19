@@ -66,6 +66,17 @@ pub struct RemoteImage {
     pub kind: String,
 }
 
+/// One collection as it exists on printables.com.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteCollection {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prints_count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ViewerInfo {
     pub id: Option<String>,
@@ -690,6 +701,56 @@ impl PrintablesClient {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// The signed-in user's printables.com collections.
+    /// Verified live: `userCollections(userId:) { id name description printsCount }`.
+    pub fn user_collections(&self, user_id: &str) -> AppResult<Vec<SiteCollection>> {
+        let query = r#"
+        query UserCollections($userId: ID!) {
+          userCollections(userId: $userId) {
+            id
+            name
+            description
+            printsCount
+            __typename
+          }
+        }
+        "#;
+        let payload = json!({
+            "operationName": "UserCollections",
+            "query": query,
+            "variables": { "userId": user_id }
+        });
+        let data = self.post_graphql(&payload)?;
+        let Some(items) = data
+            .pointer("/data/userCollections")
+            .and_then(|v| v.as_array())
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                Some(SiteCollection {
+                    id: item.get("id")?.as_str()?.to_string(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    description: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    prints_count: item
+                        .get("printsCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                })
+            })
+            .collect())
     }
 
     // --------------------------------------------------------------- transfer

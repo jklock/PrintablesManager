@@ -67,3 +67,28 @@ operation documents — a deliberate, reviewed change, not a heuristic.
 - One shared budget of ~4 GraphQL requests/second per process.
 - Downloads are sequential per model; at most `sync_concurrency` (1–8) models run in parallel.
 - No scraping of HTML pages; only the GraphQL endpoint and the media CDN.
+
+## Verified live on 2026-11-19 (authenticated session)
+
+Probed directly against `https://api.printables.com/graphql/`. These are facts,
+not assumptions — each returned real data:
+
+| Field | Shape | Notes |
+|---|---|---|
+| `me` | `{ id, email, user { id handle publicUsername } }` | The account root. `viewer` does **not** exist. |
+| `userCollections(userId: ID!)` | `[{ id, name, description, printsCount }]` | The account's collections. `userId` is `me.id`. |
+| `collection(id: ID!)` | `{ id, name, description, printsCount }` | `CollectionType` has no prints/items/models field — membership is not exposed here. |
+| `Mutations.modelUpdate(...)` | `{ ok, errors { field messages } }` | Create/update entry point. With no media it returns: *"At least one image is required."* and *"At least one Gcode, SL1 or Model file is required."* |
+| `Mutations.addPrintToCollection(collectionId: ID!)` | — | Exists; other arguments unknown. |
+| `Mutations.collectionUpdate` | — | Exists (payload type `CollectionCreateUpdateMutation`). |
+
+GraphQL introspection is disabled, so field/argument discovery is done by
+probing and reading validation errors. Unknown arguments produce
+"Did you mean ..." suggestions, which is how the surface above was mapped.
+
+### What this means for creation
+
+`modelUpdate` refuses to create a model until an image and a model file already
+exist, so publishing a new model is: upload image → upload file → `modelUpdate`.
+The app can therefore create a model **locally** today (folder + metadata + git
+commit) and publish it once the upload handshake is wired to `modelUpdate`.

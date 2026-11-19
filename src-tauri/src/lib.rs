@@ -110,6 +110,7 @@ pub fn run() {
             commands::collections::delete_collection,
             commands::collections::add_model_to_collection,
             commands::collections::remove_model_from_collection,
+            commands::collections::import_site_collections,
             // prefs
             commands::prefs::get_prefs,
             commands::prefs::set_prefs,
@@ -130,6 +131,7 @@ pub fn run() {
             commands::edit::import_model_files,
             commands::edit::delete_model_file,
             commands::edit::set_model_cover,
+            commands::edit::create_local_model,
             // account
             commands::auth::auth_status,
             commands::auth::auth_login,
