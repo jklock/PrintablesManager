@@ -113,6 +113,7 @@ pub fn run() {
             commands::collections::add_model_to_collection,
             commands::collections::remove_model_from_collection,
             commands::collections::import_site_collections,
+            commands::collections::sync_collection,
             // prefs
             commands::prefs::get_prefs,
             commands::prefs::set_prefs,

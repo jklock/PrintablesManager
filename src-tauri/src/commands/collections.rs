@@ -287,6 +287,67 @@ pub fn import_site_collections(
     Ok(data.collections)
 }
 
+/// Pull every model in a collection that is not local yet.
+#[tauri::command]
+pub fn sync_collection(
+    prefs: State<'_, Mutex<AppPrefs>>,
+    auth: State<'_, crate::auth::AuthState>,
+    args: SyncCollectionArgs,
+) -> Result<serde_json::Value, String> {
+    let snapshot = prefs.lock().map(|p| p.clone()).map_err(|e| e.to_string())?;
+    let lib_dir = library_dir(&snapshot)?;
+    let data = load_collections(&lib_dir);
+    let collection = data
+        .collections
+        .iter()
+        .find(|c| c.id == args.collection_id)
+        .ok_or_else(|| "Collection not found.".to_string())?;
+
+    if collection.model_ids.is_empty() {
+        return Err(
+            "This collection has no models yet. Import your collections first.".to_string(),
+        );
+    }
+
+    let token = auth
+        .token()
+        .ok_or_else(|| "Sign in to Printables to download a collection.".to_string())?;
+    let client =
+        crate::printables::api::PrintablesClient::with_token(Some(token)).map_err(|e| e.message)?;
+
+    let mut pulled = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failed = Vec::new();
+
+    for id in &collection.model_ids {
+        if crate::library::locator::try_find_model_dir(&lib_dir, id).is_some() {
+            skipped.push(id.clone());
+            continue;
+        }
+        match crate::printables::clone::pull_model(
+            &client,
+            id,
+            &lib_dir,
+            &crate::printables::clone::PullOptions {
+                force: false,
+                git: snapshot.git_enabled,
+            },
+            |_| {},
+        ) {
+            Ok(o) => pulled.push(o.model_id),
+            Err(e) => failed.push(format!("{id}: {}", e.message)),
+        }
+    }
+
+    Ok(serde_json::json!({ "pulled": pulled, "already_local": skipped, "failed": failed }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncCollectionArgs {
+    pub collection_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

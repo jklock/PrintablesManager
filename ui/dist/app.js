@@ -237,7 +237,12 @@ function renderTopbar() {
         </select>
       </label>`;
     if (coll) {
+      const localCount = (coll.model_ids || []).filter(id => state.models.some(m => m.id === id)).length;
+      const total = (coll.model_ids || []).length;
       toolsHTML += `
+        <span class="topbar-sub">${localCount} of ${total} downloaded</span>
+        <button class="btn btn-primary btn-sm" id="btn-download-collection" data-id="${coll.id}"
+          ${total === 0 || localCount === total ? 'disabled' : ''}>Download all</button>
         <button class="btn btn-secondary btn-sm" id="btn-rename-collection" data-id="${coll.id}">Rename</button>
         <button class="btn btn-ghost btn-danger btn-sm" id="btn-delete-collection" data-id="${coll.id}">Delete Collection</button>`;
     }
@@ -272,6 +277,8 @@ function renderTopbar() {
   if (tb) tb.addEventListener('click', () => showView('library'));
   const tbc = $('#topbar-back-collection');
   if (tbc) tbc.addEventListener('click', () => { state.activeCollectionId = null; showView('library'); });
+  const dlc = $('#btn-download-collection');
+  if (dlc) dlc.addEventListener('click', () => actDownloadCollection(dlc.dataset.id));
   const brc = $('#btn-rename-collection');
   if (brc) brc.addEventListener('click', () => actRenameCollection(brc.dataset.id));
   const bdc = $('#btn-delete-collection');
@@ -296,7 +303,7 @@ function collectionCollageHTML(c) {
     const m = covers[i];
     return m && m.cover_asset_url
       ? `<img src="${esc(m.cover_asset_url)}" alt="" loading="lazy" />`
-      : `<span class="collage-empty"></span>`;
+      : `<span class="collage-empty">${esc(((m && m.name) || c.name || '?').trim().charAt(0).toUpperCase())}</span>`;
   }).join('');
   return `<div class="collection-collage">${cells}</div>`;
 }
@@ -334,6 +341,26 @@ async function refreshCollections() {
   } catch (err) {
     console.warn('Failed to load collections:', err);
     state.collections = [];
+  }
+}
+
+async function actDownloadCollection(id) {
+  const coll = state.collections.find(c => c.id === id);
+  if (!coll) return;
+  try {
+    toast('Downloading collection…', `${(coll.model_ids || []).length} model(s)`);
+    const result = await Bridge.call('sync_collection', { collectionId: id });
+    await refreshLibrary();
+    renderLibrary();
+    renderTopbar();
+    const pulled = (result && result.pulled) || [];
+    const failed = (result && result.failed) || [];
+    toast(
+      pulled.length ? `Downloaded ${pulled.length} model(s)` : 'Nothing new to download',
+      failed.length ? `${failed.length} failed` : (result && result.already_local ? 'already local' : '')
+    );
+  } catch (err) {
+    toast('Collection download failed', err.message || err);
   }
 }
 
@@ -475,7 +502,8 @@ function cardHTML(m) {
   const extSummary = Object.keys(counts).map(e => `${counts[e]}× .${e}`).join(' · ');
   const badges = Object.keys(counts).map(e => `<span class="ext-badge ${extClass(e)}">.${e}</span>`).join('');
   const thumbHTML = m.cover_asset_url
-    ? `<img class="thumb-img" src="${esc(m.cover_asset_url)}" alt="${esc(m.name)}" loading="lazy" />`
+    ? `<img class="thumb-img" src="${esc(m.cover_asset_url)}" alt="${esc(m.name)}" loading="lazy"
+         onerror="this.classList.add('hidden');this.parentElement.classList.add('is-missing')" />`
     : `<div class="thumb-inner">${GHOST}<span class="no-prev">no preview</span></div>`;
   return `
   <article class="card" data-id="${m.id}" tabindex="0" role="button" aria-label="Open ${esc(m.name)}">
@@ -994,6 +1022,22 @@ async function refreshRemoteModels() {
     state.remoteTruncated = !!data.truncated;
     if (state.remoteTruncated) {
       accountNotice('Printables returned only the first page of results for this account.');
+    }
+
+    // Collections live on the server; pull them (with membership) as soon as we
+    // know the account, so the sidebar is never an empty shell.
+    const needsCollections = !state.collections.length
+      || state.collections.every(c => !(c.model_ids || []).length);
+    if (needsCollections) {
+      try {
+        const imported = await Bridge.call('import_site_collections', {});
+        if (Array.isArray(imported) && imported.length) {
+          state.collections = imported;
+          renderSidebarCollections();
+        }
+      } catch (err) {
+        console.warn('collection import failed:', err);
+      }
     }
     renderAccount();
   } catch (err) {

@@ -41,6 +41,7 @@ pub const COMMAND_COVERAGE: &[(&str, &str)] = &[
     ("add_model_to_collection", "add_to_collection"),
     ("remove_model_from_collection", "remove_from_collection"),
     ("import_site_collections", "import_site_collections"),
+    ("sync_collection", "sync_collection"),
     // git
     ("git_status", "git_status"),
     ("git_log", "git_log"),
@@ -325,6 +326,12 @@ fn tools() -> Value {
             "Apply a reviewed push; dry_run defaults to true.",
             json!({ "model_id": id, "dry_run": json!({"type":"boolean"}) }),
             &["model_id"]
+        ),
+        tool_spec(
+            "sync_collection",
+            "Download every model in a collection that is not local yet.",
+            json!({ "collection_id": id }),
+            &["collection_id"]
         ),
         tool_spec(
             "publish_model",
@@ -821,6 +828,37 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
                     .unwrap_or(true),
             )?;
             Ok(serde_json::to_value(report)?)
+        }
+        "sync_collection" => {
+            let api = client()?;
+            let lib = library()?;
+            let data = load_collections(&lib);
+            let collection = data
+                .collections
+                .iter()
+                .find(|c| c.id == s("collection_id"))
+                .ok_or_else(|| AppError::not_found("Collection not found."))?;
+            let mut pulled = Vec::new();
+            let mut failed = Vec::new();
+            for id in &collection.model_ids {
+                if locator::try_find_model_dir(&lib, id).is_some() {
+                    continue;
+                }
+                match crate::printables::clone::pull_model(
+                    &api,
+                    id,
+                    &lib,
+                    &crate::printables::clone::PullOptions {
+                        force: false,
+                        git: prefs()?.git_enabled,
+                    },
+                    |_| {},
+                ) {
+                    Ok(o) => pulled.push(o.model_id),
+                    Err(e) => failed.push(format!("{id}: {}", e.message)),
+                }
+            }
+            Ok(json!({ "pulled": pulled, "failed": failed }))
         }
         "publish_model" => {
             let prefs = prefs()?;
