@@ -115,6 +115,7 @@ pub fn run() {
             commands::prefs::get_prefs,
             commands::prefs::set_prefs,
             commands::prefs::open_config_folder,
+            commands::prefs::ui_ready,
             // shell / integrations
             commands::dialogs::dialog_open,
             commands::slicer::open_in_slicer,
@@ -185,20 +186,17 @@ pub fn run() {
             // files on a removable volume" prompt - which froze setup() and left
             // the window blank, with the dialog hidden behind it. Widen the
             // asset scope on a worker thread so the UI always paints.
-            if let Some(lib_path) = prefs.library_folder.clone() {
-                let scope_app = app.handle().clone();
-                std::thread::spawn(move || {
-                    let _ = scope_app
-                        .asset_protocol_scope()
-                        .allow_directory(std::path::Path::new(&lib_path), true);
-                });
-            }
+            // The asset scope is widened by `ui_ready`, which the frontend calls
+            // after its first frame. Doing it here would touch an external
+            // library volume before anything is painted, and the resulting
+            // consent sheet is app-modal - the window would stay blank.
 
             // Bring pre-2.0 model folders under version control, off the UI thread.
             if prefs.git_enabled {
                 if let Some(lib_path) = prefs.library_folder.clone() {
                     let app_handle = app.handle().clone();
                     std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(3000));
                         match printables::clone::adopt_existing_models(std::path::Path::new(
                             &lib_path,
                         )) {
@@ -222,6 +220,7 @@ pub fn run() {
             {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
                     let auth = app_handle.state::<auth::AuthState>();
                     let status = auth.restore();
                     if status.signed_in {

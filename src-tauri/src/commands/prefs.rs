@@ -25,6 +25,7 @@ pub struct SetPrefsArgs {
     pub auto_commit_local_edits: Option<bool>,
     pub sync_concurrency: Option<usize>,
     pub auto_sync_on_launch: Option<bool>,
+    pub last_view: Option<String>,
     pub remote_write_enabled: Option<bool>,
 }
 
@@ -62,6 +63,9 @@ pub fn set_prefs(
     }
     if let Some(flag) = args.auto_sync_on_launch {
         prefs.auto_sync_on_launch = flag;
+    }
+    if let Some(view) = args.last_view {
+        prefs.last_view = Some(view);
     }
     if let Some(flag) = args.remote_write_enabled {
         prefs.remote_write_enabled = flag;
@@ -121,4 +125,26 @@ pub fn open_config_folder(app: AppHandle) -> AppResult<String> {
         .reveal_item_in_dir(&dir)
         .map_err(|e| AppError::io(format!("Cannot open config folder: {e}")))?;
     Ok(dir.display().to_string())
+}
+
+/// Called by the UI once its first frame is on screen. Widening the asset scope
+/// resolves the library path, and for a library on an external volume that
+/// first touch raises a macOS consent sheet; the window must already be painted.
+#[tauri::command]
+pub fn ui_ready(app: AppHandle) -> Result<bool, String> {
+    let library = {
+        let prefs = app.state::<Mutex<AppPrefs>>();
+        let snapshot = prefs.lock().map_err(|e| e.to_string())?;
+        snapshot.library_folder.clone()
+    };
+
+    match library {
+        Some(path) => {
+            app.asset_protocol_scope()
+                .allow_directory(std::path::Path::new(&path), true)
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }

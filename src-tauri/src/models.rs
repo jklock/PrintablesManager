@@ -194,6 +194,9 @@ pub struct AppPrefs {
     /// Pull the account library automatically on launch (only when signed in).
     #[serde(default)]
     pub auto_sync_on_launch: bool,
+    /// View the app was last showing, so it reopens where you left off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_view: Option<String>,
     /// Master switch for writing to printables.com. Off by default: uploads
     /// mutate the user's real account and the write API is not documented.
     #[serde(default)]
@@ -222,6 +225,7 @@ impl Default for AppPrefs {
             auto_commit_local_edits: true,
             sync_concurrency: 3,
             auto_sync_on_launch: false,
+            last_view: None,
             remote_write_enabled: false,
             last_sync_at: None,
         }

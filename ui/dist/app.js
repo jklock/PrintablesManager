@@ -769,6 +769,10 @@ function updateStats() {
 /* ============================ VIEWS ============================ */
 function showView(v) {
   state.view = v;
+  if (state.prefs && state.prefs.last_view !== v) {
+    state.prefs.last_view = v;
+    Bridge.call('set_prefs', { lastView: v }).catch(() => {});
+  }
   $$('.view').forEach(sec => sec.classList.toggle('is-active', sec.id === 'view-' + v));
   $$('.nav-item[data-view]').forEach(b => b.classList.toggle('is-active', !state.activeCollectionId && b.dataset.view === (v === 'detail' ? 'library' : v)));
   renderSidebarCollections();
@@ -2001,6 +2005,22 @@ async function init() {
   wireLoginModal();
   wireEditModal();
   applySyncSettingsUI();
+
+  // Paint the shell before touching the library. A library on an external
+  // volume (or a first-run Keychain read) raises macOS consent sheets, and those
+  // are app-modal: if one lands before WebKit's first frame the window stays
+  // blank and the app looks dead. Give the compositor a beat, then load.
+  const startView = ['account', 'collections', 'clone'].includes(state.prefs.last_view)
+    ? state.prefs.last_view
+    : 'library';
+  if (startView !== 'library') showView(startView);
+  renderTopbar();
+  renderLibrary();
+  updateStats();
+  await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 250)));
+  // Only now is it safe to resolve the library path (see ui_ready).
+  try { await Bridge.call('ui_ready', {}); } catch (_) {}
+
   await refreshAuth();
   showCapabilities();
   refreshSlicerStatus();
