@@ -25,6 +25,7 @@ pub struct SetPrefsArgs {
     pub auto_commit_local_edits: Option<bool>,
     pub sync_concurrency: Option<usize>,
     pub auto_sync_on_launch: Option<bool>,
+    pub store_in_keychain: Option<bool>,
     pub last_view: Option<String>,
     pub remote_write_enabled: Option<bool>,
 }
@@ -63,6 +64,9 @@ pub fn set_prefs(
     }
     if let Some(flag) = args.auto_sync_on_launch {
         prefs.auto_sync_on_launch = flag;
+    }
+    if let Some(flag) = args.store_in_keychain {
+        prefs.store_in_keychain = flag;
     }
     if let Some(view) = args.last_view {
         prefs.last_view = Some(view);

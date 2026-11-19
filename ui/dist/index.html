@@ -316,6 +316,10 @@
               <h2>Account &amp; credentials</h2>
               <p class="settings-desc">Your printables.com password is never seen or stored by this app — you sign in on the website, and macOS/iCloud Keychain can autofill it there. Only the resulting session token is kept, in your login Keychain.</p>
               <div class="setting-row">
+                <div><div class="setting-label">Keep the session in the Keychain</div><div class="setting-hint">Off by default. macOS ties a Keychain item to the exact build that wrote it, so updates can ask for permission again. A protected file never asks.</div></div>
+                <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-keychain" /><span></span></label></div>
+              </div>
+              <div class="setting-row">
                 <div><div class="setting-label">Session storage</div><div class="setting-hint" id="credential-storage">Not signed in.</div></div>
                 <div class="setting-control">
                   <button class="btn btn-secondary btn-sm" id="test-keychain">Test Keychain</button>

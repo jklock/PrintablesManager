@@ -194,6 +194,11 @@ pub struct AppPrefs {
     /// Pull the account library automatically on launch (only when signed in).
     #[serde(default)]
     pub auto_sync_on_launch: bool,
+    /// Keep the session in the login Keychain. Off by default: a Keychain item
+    /// is ACL'd to the build that created it, so every ad-hoc rebuild looks like
+    /// a new app and macOS asks for permission again. A 0600 file never asks.
+    #[serde(default)]
+    pub store_in_keychain: bool,
     /// View the app was last showing, so it reopens where you left off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_view: Option<String>,
@@ -225,6 +230,7 @@ impl Default for AppPrefs {
             auto_commit_local_edits: true,
             sync_concurrency: 3,
             auto_sync_on_launch: false,
+            store_in_keychain: false,
             last_view: None,
             remote_write_enabled: false,
             last_sync_at: None,

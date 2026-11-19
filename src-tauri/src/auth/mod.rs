@@ -406,6 +406,42 @@ fn keychain_entry() -> AppResult<keyring::Entry> {
 }
 
 pub fn load_session() -> AppResult<Option<StoredSession>> {
+    let keychain_enabled = crate::config::load_prefs()
+        .map(|p| p.store_in_keychain)
+        .unwrap_or(false);
+
+    // Default path: the 0600 file. Reading the Keychain can raise a permission
+    // dialog whenever the binary's signature changed, which is every rebuild.
+    if !keychain_enabled {
+        let path = config::token_path()?;
+        if !path.exists() {
+            // One last chance to rescue a session that only ever lived in the
+            // Keychain: read it once, copy it to the protected file, and never
+            // touch the Keychain again. This is the only prompt the user should
+            // ever see after this change.
+            for service in [KEYCHAIN_SERVICE, KEYCHAIN_SERVICE_PREVIOUS] {
+                if let Ok(entry) = keyring::Entry::new(service, KEYCHAIN_ACCOUNT) {
+                    if let Ok(secret) = entry.get_password() {
+                        if let Ok(mut session) = serde_json::from_str::<StoredSession>(&secret) {
+                            session.backend = "file".to_string();
+                            let _ = write_private_file(
+                                &path,
+                                &serde_json::to_string_pretty(&session).unwrap_or_default(),
+                            );
+                            let _ = entry.delete_credential();
+                            return Ok(Some(session));
+                        }
+                    }
+                }
+            }
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)?;
+        let mut session: StoredSession = serde_json::from_str(&raw)?;
+        session.backend = "file".to_string();
+        return Ok(Some(session));
+    }
+
     if let Ok(entry) = keychain_entry() {
         if let Ok(secret) = entry.get_password() {
             if let Ok(session) = serde_json::from_str::<StoredSession>(&secret) {
@@ -434,6 +470,20 @@ pub fn load_session() -> AppResult<Option<StoredSession>> {
 fn save_session(session: &StoredSession) -> AppResult<()> {
     let mut stored = session.clone();
     let payload = serde_json::to_string(&stored)?;
+
+    let keychain_enabled = crate::config::load_prefs()
+        .map(|p| p.store_in_keychain)
+        .unwrap_or(false);
+
+    if !keychain_enabled {
+        stored.backend = "file".to_string();
+        note_keychain_error(None);
+        write_private_file(
+            &config::token_path()?,
+            &serde_json::to_string_pretty(&stored)?,
+        )?;
+        return Ok(());
+    }
 
     match keychain_entry() {
         Ok(entry) => match entry.set_password(&payload) {

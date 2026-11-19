@@ -526,6 +526,26 @@ function renderLibrary() {
   const list = filteredModels();
   const grid = $('#grid'), empty = $('#empty'), emptyLib = $('#empty-library');
 
+  if (state.activeCollectionId) {
+    const coll = state.collections.find(c => c.id === state.activeCollectionId);
+    const total = (coll && coll.model_ids || []).length;
+    const localCount = (coll && coll.model_ids || []).filter(id => state.models.some(m => m.id === id)).length;
+    if (list.length === 0) {
+      grid.innerHTML = '';
+      empty.classList.add('hidden');
+      emptyLib.classList.remove('hidden');
+      const heading = emptyLib.querySelector('h3');
+      const body = emptyLib.querySelector('p');
+      if (heading) heading.textContent = `${coll ? coll.name : 'This collection'} has nothing local yet`;
+      if (body) body.textContent = total === 0
+        ? 'Printables has not returned the models in this collection yet — press the download arrow in the Collections header to refresh it.'
+        : `${total - localCount} of ${total} model(s) are not downloaded. Use Download all to fetch them.`;
+      const syncBtn = emptyLib.querySelector('#empty-go-account');
+      if (syncBtn) syncBtn.textContent = 'Download all';
+      return;
+    }
+  }
+
   if (!state.libraryConfigured || state.models.length === 0) {
     grid.innerHTML = '';
     empty.classList.add('hidden');
@@ -1337,6 +1357,8 @@ function applySyncSettingsUI() {
   $('#pref-auto-commit').checked = !!state.prefs.auto_commit_local_edits;
   $('#pref-concurrency').value = state.prefs.sync_concurrency || 3;
   $('#pref-remote-write').checked = !!state.prefs.remote_write_enabled;
+  const keychain = $('#pref-keychain');
+  if (keychain) keychain.checked = !!state.prefs.store_in_keychain;
 }
 
 async function saveSyncPref(patch) {
@@ -1375,6 +1397,10 @@ function wireSyncSettings() {
     saveSyncPref({ sync_concurrency: Number(e.target.value) || 3 }));
   $('#pref-remote-write').addEventListener('change', e =>
     saveSyncPref({ remote_write_enabled: e.target.checked }));
+  const keychainPref = $('#pref-keychain');
+  if (keychainPref) {
+    keychainPref.addEventListener('change', () => saveSyncPref({ store_in_keychain: keychainPref.checked }));
+  }
 
   $('#auth-refresh-btn').addEventListener('click', async () => {
     try {

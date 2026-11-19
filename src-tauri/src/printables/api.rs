@@ -780,6 +780,23 @@ impl PrintablesClient {
                 "variables": { "collectionId": collection_id, "limit": 100 }
             });
             let data = self.post_graphql(&payload)?;
+
+            // A GraphQL error here means the membership query is malformed (the
+            // server rejects it unless every argument the site sends is present).
+            // Returning an empty list would silently claim the collection is
+            // empty, which is exactly the bug this replaces.
+            if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
+                if !errors.is_empty() {
+                    let first = errors[0]
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown error");
+                    return Err(AppError::graphql(format!(
+                        "Printables refused the collection membership query: {first}"
+                    )));
+                }
+            }
+
             let Some(items) = data
                 .pointer("/data/moreCollectionModels/items")
                 .and_then(|v| v.as_array())
