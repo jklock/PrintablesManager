@@ -9,6 +9,7 @@ pub mod git;
 pub mod library;
 pub mod maintenance;
 pub mod prefs;
+pub mod publish;
 pub mod push;
 pub mod shell;
 pub mod slicer;

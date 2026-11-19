@@ -169,6 +169,8 @@ pub fn run() {
             commands::push::push_preview,
             commands::push::push_apply,
             commands::push::push_log,
+            commands::publish::publish_model,
+            commands::publish::delete_remote_model,
         ])
         .setup(move |app| {
             // 1.x -> 2.0 preferences migration, then hydrate managed state.

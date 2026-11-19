@@ -1788,6 +1788,36 @@ $('#detail-files').addEventListener('click', e => {
   if (b) actSliceFile(b.dataset.file);
 });
 $('#act-edit').addEventListener('click', openEditModal);
+
+$('#act-publish').addEventListener('click', async () => {
+  const m = currentModel();
+  if (!m) return;
+  if (!confirm(`Publish "${m.name}" to printables.com?\n\nIt is created as an unpublished draft so you can finish it on the site.`)) return;
+  try {
+    toast('Publishing…', 'uploading images and files');
+    const report = await Bridge.call('publish_model', { modelId: m.id, draft: true });
+    if (report.ok) {
+      toast('Published as a draft', `${report.images_uploaded} image(s), ${report.files_uploaded} file(s)`);
+    } else {
+      toast('Printables refused the publish', (report.errors || []).join('; ') || 'unknown');
+    }
+  } catch (err) {
+    toast('Publish failed', err.message || err);
+  }
+});
+
+$('#act-delete-remote').addEventListener('click', async () => {
+  const m = currentModel();
+  if (!m) return;
+  if (!/^\d+$/.test(m.id)) { toast('Not on Printables', 'this model was created locally'); return; }
+  if (!confirm(`Delete model ${m.id} on printables.com?\n\nThis removes it from your account. It cannot be undone here.`)) return;
+  try {
+    await Bridge.call('delete_remote_model', { modelId: m.id });
+    toast('Deleted on Printables', m.id);
+  } catch (err) {
+    toast('Remote delete failed', err.message || err);
+  }
+});
 $('#act-slicer').addEventListener('click', () => actOpenInSlicer(state.models.find(m => m.id === state.detailId)));
 $('#act-export').addEventListener('click', () => actExport(state.models.find(m => m.id === state.detailId)));
 $('#act-folder').addEventListener('click', () => actFolder(state.models.find(m => m.id === state.detailId)));

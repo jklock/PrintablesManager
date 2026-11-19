@@ -65,6 +65,8 @@ pub const COMMAND_COVERAGE: &[(&str, &str)] = &[
     ("clone_model", "clone_model"),
     ("push_preview", "push_preview"),
     ("push_apply", "push_apply"),
+    ("publish_model", "publish_model"),
+    ("delete_remote_model", "delete_remote_model"),
     // native UI only
     ("dialog_open", "-ui-only"),
     ("ui_ready", "-ui-only"),
@@ -322,6 +324,18 @@ fn tools() -> Value {
             "push_apply",
             "Apply a reviewed push; dry_run defaults to true.",
             json!({ "model_id": id, "dry_run": json!({"type":"boolean"}) }),
+            &["model_id"]
+        ),
+        tool_spec(
+            "publish_model",
+            "Upload images and files, then create or update the model on printables.com (draft by default). Requires writes enabled.",
+            json!({ "model_id": id, "draft": json!({"type":"boolean"}) }),
+            &["model_id"]
+        ),
+        tool_spec(
+            "delete_remote_model",
+            "Delete the model on printables.com. Irreversible. Requires writes enabled.",
+            json!({ "model_id": id }),
             &["model_id"]
         ),
     ])
@@ -807,6 +821,33 @@ fn call(name: &str, args: &Value) -> Result<Value, String> {
                     .unwrap_or(true),
             )?;
             Ok(serde_json::to_value(report)?)
+        }
+        "publish_model" => {
+            let prefs = prefs()?;
+            if !prefs.remote_write_enabled {
+                return Err(AppError::unsupported(
+                    "Publishing is disabled. Enable remote writes in preferences first.",
+                ));
+            }
+            let api = client()?;
+            let dir = model_dir(&s("model_id"))?;
+            let report = crate::commands::publish::publish(
+                &api,
+                &dir,
+                args.get("draft").and_then(|v| v.as_bool()).unwrap_or(true),
+            )?;
+            Ok(serde_json::to_value(report)?)
+        }
+        "delete_remote_model" => {
+            let prefs = prefs()?;
+            if !prefs.remote_write_enabled {
+                return Err(AppError::unsupported(
+                    "Remote writes are disabled. Enable them in preferences first.",
+                ));
+            }
+            let api = client()?;
+            crate::commands::publish::delete_remote(&api, &s("model_id"))?;
+            Ok(json!({ "deleted": s("model_id") }))
         }
         other => Err(AppError::invalid(format!("Unknown tool: {other}"))),
     })();
