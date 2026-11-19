@@ -108,6 +108,7 @@ pub fn push_log_path(library: &Path) -> PathBuf {
     manager_dir(library).join("push-log.jsonl")
 }
 
+#[allow(dead_code)] // kept for future capability caching; introspection is disabled
 pub fn capabilities_path(library: &Path) -> PathBuf {
     manager_dir(library).join("capabilities.json")
 }

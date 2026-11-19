@@ -1,12 +1,12 @@
-//! Account commands: sign in, sign out, status, and write-API discovery.
+//! Account commands: sign in, sign out, status, token escape hatch, and the
+//! (static, truthful) statement of what the push path supports.
 
-use crate::auth::{login, AuthState, AuthStatus};
-use crate::config;
+use crate::auth::{login, AuthState, AuthStatus, StoredSession};
 use crate::error::{AppError, AppResult};
-use crate::models::AppPrefs;
 use crate::printables::api::PrintablesClient;
-use crate::sync::capabilities::{self, Capabilities};
-use std::sync::Mutex;
+use crate::sync::push;
+use serde::Deserialize;
+use serde_json::Value;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -14,8 +14,7 @@ pub fn auth_status(auth: State<'_, AuthState>) -> AuthStatus {
     auth.status()
 }
 
-/// Opens the Printables sign-in window. Completion arrives as an
-/// `auth://changed` event.
+/// Opens the Printables sign-in window. Completion arrives as `auth://changed`.
 #[tauri::command]
 pub fn auth_login(app: AppHandle) -> AppResult<()> {
     login::start_login(&app)
@@ -34,46 +33,50 @@ pub fn auth_verify(auth: State<'_, AuthState>) -> AppResult<AuthStatus> {
         .token()
         .ok_or_else(|| AppError::not_authenticated("Not signed in to Printables."))?;
     let client = PrintablesClient::with_token(Some(token))?;
-    let viewer = client.viewer()?;
+    let me = client.viewer()?;
 
     let mut status = auth.status();
     status.signed_in = true;
-    status.username = viewer.public_username;
+    status.username = me.public_username.or(me.handle);
     Ok(status)
 }
 
-/// Introspects the GraphQL schema for write mutations and stores the result in
-/// `<library>/.manager/capabilities.json`.
 #[tauri::command]
-pub fn auth_probe_write_api(
-    prefs: State<'_, Mutex<AppPrefs>>,
-    auth: State<'_, AuthState>,
-) -> AppResult<Capabilities> {
-    let snapshot = {
-        let prefs = prefs
-            .lock()
-            .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
-        prefs.clone()
-    };
-    let library = config::library_dir(&snapshot)?;
-    let token = auth
-        .token()
-        .ok_or_else(|| AppError::not_authenticated("Sign in before probing the write API."))?;
-    let client = PrintablesClient::with_token(Some(token))?;
-    capabilities::probe(&client, &library)
+pub fn auth_refresh(auth: State<'_, AuthState>) -> AppResult<AuthStatus> {
+    auth.refresh()
 }
 
-/// Returns the cached capability report, if any.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenArgs {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+/// Escape hatch: adopt a token copied out of the browser.
 #[tauri::command]
-pub fn auth_cached_capabilities(
-    prefs: State<'_, Mutex<AppPrefs>>,
-) -> AppResult<Option<Capabilities>> {
-    let snapshot = {
-        let prefs = prefs
-            .lock()
-            .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
-        prefs.clone()
-    };
-    let library = config::library_dir(&snapshot)?;
-    Ok(capabilities::load(&library))
+pub fn auth_set_token(args: TokenArgs, auth: State<'_, AuthState>) -> AppResult<AuthStatus> {
+    let session: StoredSession = login::adopt_pasted_token(args.access_token, args.refresh_token)?;
+    auth.set(session)?;
+    Ok(auth.status())
+}
+
+/// What publishing supports. Real values, not a schema probe: printables.com
+/// has GraphQL introspection disabled, so the operations are pinned in code.
+#[tauri::command]
+pub fn auth_capabilities() -> Value {
+    push::capabilities()
+}
+
+/// Round-trips a throwaway item through the login Keychain so the user can see
+/// whether this build's signature may use it.
+#[tauri::command]
+pub fn auth_keychain_test() -> crate::auth::KeychainReport {
+    crate::auth::keychain_selftest()
+}
+
+/// Retries storing the current session in the Keychain after a file fallback.
+#[tauri::command]
+pub fn auth_storage_retry(auth: State<'_, AuthState>) -> AppResult<AuthStatus> {
+    auth.promote_to_keychain()
 }

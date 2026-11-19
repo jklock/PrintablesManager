@@ -101,10 +101,11 @@
           <div class="empty-state hidden" id="empty-library" data-od-id="empty-library">
             <svg width="52" height="52" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M24 5 42 14.5v19L24 43 6 33.5v-19L24 5z"></path><path d="M6 14.5 24 24l18-9.5M24 24v19"></path></svg>
             <h3>Your library is empty</h3>
-            <p>Set a library folder in Preferences, or clone your first model to get started.</p>
+            <p>Sign in and sync the models you authored, or clone a single model by URL.</p>
             <div style="display:flex;gap:8px;justify-content:center;margin-top:16px">
+              <button class="btn btn-primary btn-sm" id="empty-go-account">Sync My Models</button>
               <button class="btn btn-secondary btn-sm" id="empty-go-settings">Open Preferences</button>
-              <button class="btn btn-primary btn-sm" id="empty-go-clone">Clone a Model</button>
+              <button class="btn btn-ghost btn-sm" id="empty-go-clone">Clone a URL</button>
             </div>
           </div>
         </section>
@@ -292,6 +293,18 @@
               </div>
             </div>
 
+            <div class="settings-card" id="credentials-card">
+              <h2>Account &amp; credentials</h2>
+              <p class="settings-desc">Your printables.com password is never seen or stored by this app — you sign in on the website, and macOS/iCloud Keychain can autofill it there. Only the resulting session token is kept, in your login Keychain.</p>
+              <div class="setting-row">
+                <div><div class="setting-label">Session storage</div><div class="setting-hint" id="credential-storage">Not signed in.</div></div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary btn-sm" id="test-keychain">Test Keychain</button>
+                  <button class="btn btn-ghost btn-sm hidden" id="retry-keychain">Store in Keychain</button>
+                </div>
+              </div>
+            </div>
+
             <div class="settings-card" id="sync-settings-card">
               <h2>Version control &amp; sync</h2>
               <p class="settings-desc">Every model folder is its own git repository. Local edits are committed automatically and can be pushed back to printables.com after review.</p>
@@ -312,9 +325,10 @@
                 <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-remote-write" /><span></span></label></div>
               </div>
               <div class="setting-row">
-                <div><div class="setting-label">Write API</div><div class="setting-hint" id="capability-hint">Not probed yet.</div></div>
+                <div><div class="setting-label">Publishing</div><div class="setting-hint" id="capability-hint">Model files and details can be pushed. Image uploads are not supported.</div></div>
                 <div class="setting-control">
-                  <button class="btn btn-secondary btn-sm" id="probe-write-api">Probe write API</button>
+                  <button class="btn btn-secondary btn-sm" id="auth-refresh-btn">Refresh session</button>
+                  <button class="btn btn-ghost btn-sm" id="auth-token-btn">Add token manually</button>
                 </div>
               </div>
               <div class="setting-row">
@@ -365,6 +379,28 @@
       <div class="modal-actions">
         <button class="btn btn-secondary btn-sm" id="prompt-modal-cancel" type="button">Cancel</button>
         <button class="btn btn-primary btn-sm" id="prompt-modal-ok" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="login-modal" role="dialog" aria-modal="true" aria-label="Sign in to Printables">
+    <div class="modal-card login-modal-card">
+      <h3>Sign in to Printables</h3>
+      <ol class="login-steps">
+        <li>Click <strong>Open sign-in window</strong> — the real Printables login page opens in its own window.</li>
+        <li>Sign in with your Prusa Account. Google/Apple sign-in and 2FA work normally, and macOS can autofill the password you already saved in iCloud Keychain.</li>
+        <li>The app reads the session cookie and keeps it in your login Keychain — it never sees or stores your password.</li>
+      </ol>
+      <div class="login-status" id="login-status">Not started.</div>
+      <details class="login-advanced">
+        <summary>Paste a token instead</summary>
+        <p class="setting-hint">In a browser on printables.com, open DevTools → Application → Cookies and copy the value of <code>auth.access_token</code>.</p>
+        <input type="password" id="login-token" placeholder="auth.access_token" autocomplete="off" spellcheck="false" />
+        <button class="btn btn-secondary btn-sm" id="login-token-save" type="button">Use this token</button>
+      </details>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="login-cancel" type="button">Cancel</button>
+        <button class="btn btn-primary" id="login-start" type="button">Open sign-in window</button>
       </div>
     </div>
   </div>

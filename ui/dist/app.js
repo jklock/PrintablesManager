@@ -461,7 +461,7 @@ function renderLibrary() {
   const list = filteredModels();
   const grid = $('#grid'), empty = $('#empty'), emptyLib = $('#empty-library');
 
-  if (!state.libraryConfigured) {
+  if (!state.libraryConfigured || state.models.length === 0) {
     grid.innerHTML = '';
     empty.classList.add('hidden');
     emptyLib.classList.remove('hidden');
@@ -754,6 +754,7 @@ function showView(v) {
   if (v === 'settings') {
     $('#library-path').value = state.prefs.library_folder || 'Not set';
     applySyncSettingsUI();
+    renderCredentialStorage();
     updateStats();
   }
   window.scrollTo(0, 0);
@@ -824,6 +825,7 @@ async function refreshAuth() {
     state.auth = { signed_in: false };
   }
   renderAccountFoot();
+  renderCredentialStorage();
 }
 
 function renderAccountFoot() {
@@ -832,11 +834,32 @@ function renderAccountFoot() {
   const signed = authSignedIn();
   const name = state.auth.username || (signed ? 'Printables account' : 'Not signed in');
   nameEl.textContent = name;
-  $('#account-sub').textContent = signed ? 'Signed in · Keychain' : 'Printables account';
+  const backend = state.auth.storage === 'keychain'
+    ? 'Keychain'
+    : (state.auth.storage === 'file' ? 'file fallback' : 'Keychain');
+  $('#account-sub').textContent = signed ? `Signed in · ${backend}` : 'Printables account';
   $('#account-avatar').textContent = (name.trim().charAt(0) || '?').toUpperCase();
   $('#account-action').textContent = signed ? 'Sign out' : 'Sign in';
   const count = $('#nav-account-count');
   if (count) count.textContent = state.remoteModels.length ? String(state.remoteModels.length) : '';
+}
+
+function renderCredentialStorage() {
+  const el = $('#credential-storage');
+  if (!el) return;
+  const auth = state.auth || {};
+  const retry = $('#retry-keychain');
+
+  if (auth.storage === 'keychain') {
+    el.textContent = 'Stored in the login Keychain — nothing is written outside it.';
+    if (retry) retry.classList.add('hidden');
+  } else if (auth.storage === 'file') {
+    el.textContent = auth.storage_warning || 'Stored in a file because the Keychain refused the write.';
+    if (retry) retry.classList.remove('hidden');
+  } else {
+    el.textContent = 'Not signed in.';
+    if (retry) retry.classList.add('hidden');
+  }
 }
 
 function accountNotice(text, isError) {
@@ -848,13 +871,54 @@ function accountNotice(text, isError) {
   el.classList.remove('hidden');
 }
 
+function openLoginModal() {
+  const modal = $('#login-modal');
+  if (!modal) return;
+  const status = $('#login-status');
+  status.textContent = 'Not started.';
+  status.classList.remove('is-error');
+  modal.classList.remove('hidden');
+}
+
 async function actLogin() {
-  try {
-    await Bridge.call('auth_login', {});
-    toast('Sign in', 'Finish signing in in the window that just opened');
-  } catch (err) {
-    toast('Cannot open sign-in', err.message || err);
-  }
+  openLoginModal();
+}
+
+function wireLoginModal() {
+  const modal = $('#login-modal');
+  if (!modal) return;
+  const close = () => modal.classList.add('hidden');
+  $('#login-cancel').addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+
+  $('#login-start').addEventListener('click', async () => {
+    const status = $('#login-status');
+    status.textContent = 'Opening sign-in window…';
+    status.classList.remove('is-error');
+    try {
+      await Bridge.call('auth_login', {});
+    } catch (err) {
+      status.textContent = err.message || String(err);
+      status.classList.add('is-error');
+    }
+  });
+
+  $('#login-token-save').addEventListener('click', async () => {
+    const value = ($('#login-token').value || '').trim();
+    const status = $('#login-status');
+    if (!value) { status.textContent = 'Paste the auth.access_token value first.'; return; }
+    try {
+      const st = await Bridge.call('auth_set_token', { accessToken: value });
+      state.auth = st || { signed_in: false };
+      renderAccount();
+      close();
+      toast('Signed in', state.auth.username || 'token accepted');
+      if (state.view === 'account') refreshRemoteModels();
+    } catch (err) {
+      status.textContent = err.message || String(err);
+      status.classList.add('is-error');
+    }
+  });
 }
 
 async function actLogout() {
@@ -1197,12 +1261,15 @@ async function showCapabilities() {
   const hint = $('#capability-hint');
   if (!hint) return;
   try {
-    const caps = await Bridge.call('auth_cached_capabilities', {});
-    if (!caps || !caps.discovered_at) { hint.textContent = 'Not probed yet.'; return; }
-    const role = (r) => caps.roles?.[r] || 'not available';
-    hint.textContent = `Probed ${fmtDate(caps.discovered_at)} — upload: ${role('add_file')}, delete: ${role('delete_file')}, update: ${role('update_model')}`;
+    const caps = await Bridge.call('auth_capabilities', {});
+    if (!caps || typeof caps !== 'object') return;
+    const parts = [];
+    if (caps.files) parts.push('model files');
+    if (caps.metadata) parts.push('model details');
+    if (caps.images) parts.push('images');
+    hint.textContent = `Publishing supports ${parts.join(', ') || 'nothing yet'}.${caps.images ? '' : ' Image uploads are not implemented.'}`;
   } catch (_) {
-    hint.textContent = 'Not probed yet.';
+    /* backend not reachable in browser preview */
   }
 }
 
@@ -1217,17 +1284,18 @@ function wireSyncSettings() {
   $('#pref-remote-write').addEventListener('change', e =>
     saveSyncPref({ remote_write_enabled: e.target.checked }));
 
-  $('#probe-write-api').addEventListener('click', async () => {
+  $('#auth-refresh-btn').addEventListener('click', async () => {
     try {
-      const caps = await Bridge.call('auth_probe_write_api', {});
-      $('#capability-hint').textContent =
-        `Probed — upload: ${caps.roles?.add_file || 'not available'}, delete: ${caps.roles?.delete_file || 'not available'}, update: ${caps.roles?.update_model || 'not available'}`;
-      toast('Write API probed', `${caps.fields?.length || 0} mutations discovered`);
+      const status = await Bridge.call('auth_refresh', {});
+      state.auth = status || state.auth;
+      renderAccountFoot();
+      toast('Session refreshed', status && status.signed_in ? (status.username || 'signed in') : 'sign in again');
     } catch (err) {
-      $('#capability-hint').textContent = err.message || 'Probe failed';
-      toast('Probe failed', err.message || err);
+      toast('Cannot refresh session', err.message || err);
     }
   });
+
+  $('#auth-token-btn').addEventListener('click', openLoginModal);
 
   $('#adopt-models').addEventListener('click', async () => {
     try {
@@ -1243,6 +1311,45 @@ function wireSyncSettings() {
   $('#open-config').addEventListener('click', () => {
     Bridge.call('open_config_folder', {}).catch(err => toast('Cannot open folder', err.message || err));
   });
+
+  const testKeychain = $('#test-keychain');
+  if (testKeychain) {
+    testKeychain.addEventListener('click', async () => {
+      const el = $('#credential-storage');
+      if (el) el.textContent = 'Testing the login Keychain…';
+      try {
+        const report = await Bridge.call('auth_keychain_test', {});
+        if (report && report.healthy) {
+          if (el) el.textContent = `Keychain OK — write, read and delete all succeeded (${report.service}).`;
+          toast('Keychain OK', report.service);
+        } else {
+          const why = (report && report.error) || 'unknown error';
+          if (el) el.textContent = `Keychain problem: ${why}`;
+          toast('Keychain problem', why);
+        }
+      } catch (err) {
+        if (el) el.textContent = `Keychain problem: ${err.message || err}`;
+        toast('Keychain problem', err.message || err);
+      }
+    });
+  }
+
+  const retryKeychain = $('#retry-keychain');
+  if (retryKeychain) {
+    retryKeychain.addEventListener('click', async () => {
+      try {
+        const status = await Bridge.call('auth_storage_retry', {});
+        state.auth = status || state.auth;
+        renderAccountFoot();
+        renderCredentialStorage();
+        toast(status && status.storage === 'keychain'
+          ? 'Session moved to the Keychain'
+          : 'Keychain still refused — see the message above');
+      } catch (err) {
+        toast('Keychain retry failed', err.message || err);
+      }
+    });
+  }
 }
 
 /* ============================ MODAL PROMPT ============================ */
@@ -1429,6 +1536,7 @@ $('#empty-clear').addEventListener('click', () => {
 
 $('#empty-go-settings').addEventListener('click', () => showView('settings'));
 $('#empty-go-clone').addEventListener('click', () => showView('clone'));
+$('#empty-go-account').addEventListener('click', () => showView('account'));
 
 /* detail — strip, media, tags, actions, files */
 $('#detail-strip').addEventListener('click', e => {
@@ -1612,13 +1720,28 @@ async function wireBackendEvents() {
   await Bridge.listen('auth://changed', async event => {
     const payload = event.payload || {};
     state.auth = { signed_in: !!payload.signed_in, username: payload.username || null };
+    const modal = $('#login-modal');
+    if (modal) modal.classList.add('hidden');
     renderAccount();
     if (authSignedIn()) refreshRemoteModels();
     toast('Signed in', payload.username || 'Printables account connected');
   });
 
   await Bridge.listen('auth://error', event => {
-    toast('Sign-in problem', (event.payload && event.payload.message) || 'unknown error');
+    const message = (event.payload && event.payload.message) || 'unknown error';
+    const status = $('#login-status');
+    if (status && !$('#login-modal').classList.contains('hidden')) {
+      status.textContent = message;
+      status.classList.add('is-error');
+    }
+    toast('Sign-in problem', message);
+  });
+
+  await Bridge.listen('auth://progress', event => {
+    const status = $('#login-status');
+    if (!status) return;
+    status.textContent = (event.payload && event.payload.message) || '';
+    status.classList.remove('is-error');
   });
 
   await Bridge.listen('library://model-changed', async event => {
@@ -1663,6 +1786,7 @@ async function init() {
   $('#library-path').value = state.prefs.library_folder || 'Not set';
 
   wireSyncSettings();
+  wireLoginModal();
   applySyncSettingsUI();
   await refreshAuth();
   showCapabilities();

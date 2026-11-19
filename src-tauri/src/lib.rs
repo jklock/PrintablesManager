@@ -1,6 +1,5 @@
 //! Printables Offline 2.0 — macOS-only, account-aware, git-backed library.
 
-mod auth;
 mod commands;
 mod config;
 mod error;
@@ -10,6 +9,9 @@ mod library;
 mod models;
 mod printables;
 mod sync;
+
+// Diagnostics (`examples/keychain_check.rs`) reach into the real session code.
+pub mod auth;
 
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -55,8 +57,14 @@ pub fn run() {
             commands::auth::auth_login,
             commands::auth::auth_logout,
             commands::auth::auth_verify,
-            commands::auth::auth_probe_write_api,
-            commands::auth::auth_cached_capabilities,
+            commands::auth::auth_refresh,
+            commands::auth::auth_set_token,
+            commands::auth::auth_capabilities,
+            commands::auth::auth_keychain_test,
+            commands::auth::auth_storage_retry,
+            commands::auth::auth_refresh,
+            commands::auth::auth_set_token,
+            commands::auth::auth_capabilities,
             // sync
             commands::sync::account_models,
             commands::sync::sync_all,
@@ -119,6 +127,26 @@ pub fn run() {
 
             // Watch the library so local edits become commits.
             sync::watcher::spawn_supervisor(app.handle().clone(), jobs_for_setup);
+
+            // Stay signed in: renew an expired session from the Keychain-held
+            // refresh token, off the UI thread.
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let auth = app_handle.state::<auth::AuthState>();
+                    let status = auth.restore();
+                    if status.signed_in {
+                        use tauri::Emitter;
+                        let _ = app_handle.emit(
+                            "auth://changed",
+                            serde_json::json!({
+                                "signed_in": true,
+                                "username": status.username,
+                            }),
+                        );
+                    }
+                });
+            }
 
             Ok(())
         })

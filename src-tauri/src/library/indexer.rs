@@ -213,6 +213,7 @@ mod tests {
                 published_date: None,
             },
             description: "desc".into(),
+            remote_description_html: String::new(),
             cloned_at: "2026-01-01T00:00:00Z".into(),
             files: vec![MetadataFile {
                 name: "part.stl".into(),

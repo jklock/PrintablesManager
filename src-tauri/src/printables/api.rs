@@ -69,6 +69,9 @@ pub struct RemoteImage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ViewerInfo {
     pub id: Option<String>,
+    /// The account's numeric user id, which `userModels` needs.
+    pub user_id: Option<String>,
+    pub handle: Option<String>,
     pub public_username: Option<String>,
 }
 
@@ -106,6 +109,11 @@ impl PrintablesClient {
 
     pub fn has_token(&self) -> bool {
         self.token.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+    }
+
+    /// Shared HTTP client, used by the upload writer for presigned POSTs.
+    pub fn http(&self) -> &Client {
+        &self.http
     }
 
     /// Executes a caller-supplied GraphQL document. Used by capability
@@ -228,20 +236,26 @@ impl PrintablesClient {
         if !self.has_token() {
             return Err(AppError::not_authenticated("Not signed in to Printables."));
         }
+        // Verified against the live API: the account root is `me`, and the
+        // public identity hangs off `me.user`.
         let query = r#"
-        query Viewer {
-          viewer {
+        query Me {
+          me {
             id
-            publicUsername
-            __typename
+            email
+            user {
+              id
+              handle
+              publicUsername
+            }
           }
         }
         "#;
-        let payload = json!({ "operationName": "Viewer", "query": query, "variables": {} });
+        let payload = json!({ "operationName": "Me", "query": query, "variables": {} });
         let data = self.post_graphql(&payload)?;
 
-        let viewer = data
-            .pointer("/data/viewer")
+        let me = data
+            .pointer("/data/me")
             .filter(|v| !v.is_null())
             .ok_or_else(|| {
                 AppError::not_authenticated(
@@ -250,92 +264,82 @@ impl PrintablesClient {
             })?;
 
         Ok(ViewerInfo {
-            id: viewer.get("id").and_then(|v| v.as_str()).map(String::from),
-            public_username: viewer
-                .get("publicUsername")
+            id: me.get("id").and_then(|v| v.as_str()).map(String::from),
+            user_id: me
+                .pointer("/user/id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            handle: me
+                .pointer("/user/handle")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            public_username: me
+                .pointer("/user/publicUsername")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         })
     }
 
-    /// Lists models authored by `username`.
+    /// Lists models authored by a user.
     ///
-    /// printables.com publishes no documented "my models" query, so this scopes
-    /// the public search endpoint to the account name and filters by author.
-    /// Cursor support is optional: when the server returns no cursor the caller
-    /// stops after one page.
-    pub fn author_models(
+    /// `userModels` is the website's own listing operation. It is public, takes
+    /// a real cursor, and needs the numeric user id (see [`viewer`]):
+    ///
+    /// ```graphql
+    /// query UserModels($id: ID!, $limit: Int, $cursor: String, $search: String) {
+    ///   userModels(userId: $id, limit: $limit, cursor: $cursor, query: $search) {
+    ///     cursor
+    ///     items { ... }
+    ///   }
+    /// }
+    /// ```
+    pub fn user_models(
         &self,
-        username: &str,
+        user_id: &str,
         limit: usize,
         cursor: Option<&str>,
+        search: Option<&str>,
     ) -> AppResult<AuthorModelsPage> {
-        let query = if cursor.is_some() {
-            r#"
-            query AuthorModels($query: String!, $limit: Int, $cursor: String) {
-              result: searchPrints2(query: $query, printType: print, limit: $limit, cursor: $cursor) {
-                items { ...Model __typename }
-                cursor
-                __typename
-              }
+        let query = r#"
+        query UserModels($id: ID!, $limit: Int!, $cursor: String, $search: String) {
+          userModels(userId: $id, limit: $limit, cursor: $cursor, query: $search) {
+            cursor
+            items {
+              id
+              name
+              slug
+              datePublished
+              downloadCount
+              likesCount
+              image { id filePath }
+              user { id handle publicUsername }
             }
-            fragment Model on PrintType {
-              id name slug ratingAvg likesCount downloadCount datePublished
-              user { id handle publicUsername __typename }
-              image { filePath }
-              __typename
-            }
-            "#
-        } else {
-            r#"
-            query AuthorModels($query: String!, $limit: Int) {
-              result: searchPrints2(query: $query, printType: print, limit: $limit) {
-                items { ...Model __typename }
-                __typename
-              }
-            }
-            fragment Model on PrintType {
-              id name slug ratingAvg likesCount downloadCount datePublished
-              user { id handle publicUsername __typename }
-              image { filePath }
-              __typename
-            }
-            "#
-        };
-
-        let mut variables = json!({ "query": username, "limit": limit });
-        if let Some(c) = cursor {
-            variables["cursor"] = json!(c);
+          }
         }
+        "#;
 
         let payload = json!({
-            "operationName": "AuthorModels",
+            "operationName": "UserModels",
             "query": query,
-            "variables": variables
+            "variables": {
+                "id": user_id,
+                "limit": limit,
+                "cursor": cursor,
+                "search": search,
+            }
         });
 
         let data = self.post_graphql(&payload)?;
-        let items = data
-            .pointer("/data/result/items")
+        let models = data
+            .pointer("/data/userModels/items")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
 
-        let wanted = username.to_lowercase();
-        let filtered: Vec<Value> = items
-            .into_iter()
-            .filter(|item| {
-                item.pointer("/user/publicUsername")
-                    .and_then(|v| v.as_str())
-                    .map(|u| u.to_lowercase() == wanted)
-                    .unwrap_or(false)
-            })
-            .collect();
-
         Ok(AuthorModelsPage {
-            models: filtered,
+            models,
             cursor: data
-                .pointer("/data/result/cursor")
+                .pointer("/data/userModels/cursor")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         })

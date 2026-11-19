@@ -1,7 +1,6 @@
 //! Sync engine: pulls a whole account library, one model at a time, with a
 //! bounded number of parallel workers, progress events, and cancellation.
 
-pub mod capabilities;
 pub mod plan;
 pub mod push;
 pub mod watcher;

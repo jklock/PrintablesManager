@@ -61,11 +61,15 @@ pub fn account_models(
         .ok_or_else(|| AppError::not_authenticated("Sign in to see your Printables models."))?;
 
     let client = PrintablesClient::with_token(Some(token))?;
-    let viewer = client.viewer()?;
-    let username = viewer
+    let me = client.viewer()?;
+    let user_id = me.user_id.clone().ok_or_else(|| {
+        AppError::not_authenticated("Printables did not report a user id for this session.")
+    })?;
+    let username = me
         .public_username
         .clone()
-        .ok_or_else(|| AppError::not_authenticated("Printables did not report a username."))?;
+        .or_else(|| me.handle.clone())
+        .unwrap_or_else(|| "your account".to_string());
 
     let local = local_model_ids(&library);
     let mut models: Vec<Value> = Vec::new();
@@ -73,7 +77,7 @@ pub fn account_models(
     let mut truncated = false;
 
     for _ in 0..20 {
-        let page = client.author_models(&username, 100, cursor.as_deref())?;
+        let page = client.user_models(&user_id, 100, cursor.as_deref(), None)?;
         if page.models.is_empty() {
             break;
         }
@@ -138,15 +142,15 @@ pub fn sync_all(
         .ok_or_else(|| AppError::not_authenticated("Sign in to sync your library."))?;
 
     let client = PrintablesClient::with_token(Some(token.clone()))?;
-    let viewer = client.viewer()?;
-    let username = viewer
-        .public_username
-        .ok_or_else(|| AppError::not_authenticated("Printables did not report a username."))?;
+    let me = client.viewer()?;
+    let user_id = me.user_id.clone().ok_or_else(|| {
+        AppError::not_authenticated("Printables did not report a user id for this session.")
+    })?;
 
     let mut ids: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..20 {
-        let page = client.author_models(&username, 100, cursor.as_deref())?;
+        let page = client.user_models(&user_id, 100, cursor.as_deref(), None)?;
         if page.models.is_empty() {
             break;
         }

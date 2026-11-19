@@ -1,13 +1,14 @@
-//! The in-app login window.
+//! The in-app sign-in window.
 //!
-//! Opens a normal webview at printables.com/login so the user signs in exactly
-//! as they would in a browser (including Google/Apple SSO and 2FA). Once the
-//! page is back on printables.com the Auth0 SPA has cached its access token in
-//! `localStorage`; we read it and close the window.
+//! Opens printables.com/login in a normal webview so the user can sign in with
+//! Prusa Account (including Google/Apple SSO and 2FA). When the site sets its
+//! `auth.access_token` cookie we adopt it, close the window, and report the
+//! account name back to the UI.
 //!
-//! The token never travels through a URL, a log line, or an error message.
+//! There is no redirect interception and no token parsing from URLs: the site
+//! keeps the session in cookies, so we read the cookies.
 
-use super::{adopt_token, AuthState};
+use super::{adopt_tokens, AuthState};
 use crate::error::{AppError, AppResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,41 +17,29 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const LOGIN_WINDOW_LABEL: &str = "printables-login";
 const LOGIN_URL: &str = "https://www.printables.com/login";
-const TITLE_PREFIX: &str = "POAUTH:";
-const POLL_INTERVAL_MS: u64 = 500;
+const POLL_INTERVAL_MS: u64 = 700;
 const MAX_WAIT_MS: u64 = 10 * 60 * 1000;
 
-/// Runs inside the login webview. Walks `localStorage` for the Auth0 cache and
-/// publishes the token by overwriting the document title, which the Rust side
-/// can read without injecting a callback bridge into a remote origin.
-const EXTRACT_JS: &str = r#"
+/// Reads the session cookies through the browser API as well as through
+/// `document.cookie`, so non-HttpOnly values still work if the API differs.
+const READ_COOKIES_JS: &str = r#"
 (function () {
   try {
-    function find(o, depth) {
-      if (!o || typeof o !== 'object' || depth > 4) return null;
-      if (typeof o.access_token === 'string' && o.access_token.length > 20) {
-        return { t: o.access_token, e: o.expires_in || 0 };
-      }
-      for (var k in o) {
-        if (Object.prototype.hasOwnProperty.call(o, k)) {
-          var r = find(o[k], depth + 1);
-          if (r) return r;
-        }
-      }
-      return null;
+    var out = {};
+    String(document.cookie || '').split(';').forEach(function (part) {
+      var i = part.indexOf('=');
+      if (i > 0) { out[part.slice(0, i).trim()] = part.slice(i + 1).trim(); }
+    });
+    if (out['auth.access_token']) {
+      document.title = 'POAUTH:' + JSON.stringify({
+        a: out['auth.access_token'],
+        r: out['auth.refresh_token'] || null
+      });
     }
-    var hit = null;
-    for (var i = 0; i < localStorage.length && !hit; i++) {
-      var key = localStorage.key(i) || '';
-      if (key.toLowerCase().indexOf('auth') === -1) continue;
-      try { hit = find(JSON.parse(localStorage.getItem(key)), 0); } catch (e) {}
-    }
-    if (hit) { document.title = 'POAUTH:' + btoa(JSON.stringify(hit)); }
   } catch (e) {}
 })();
 "#;
 
-/// Opens the login window and waits for a token in the background.
 pub fn start_login(app: &AppHandle) -> AppResult<()> {
     let auth = app.state::<AuthState>();
     {
@@ -74,8 +63,8 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
 
     let window = WebviewWindowBuilder::new(app, LOGIN_WINDOW_LABEL, WebviewUrl::External(url))
         .title("Sign in to Printables")
-        .inner_size(520.0, 780.0)
-        .min_inner_size(420.0, 600.0)
+        .inner_size(520.0, 800.0)
+        .min_inner_size(420.0, 620.0)
         .build()
         .map_err(|e| AppError::internal(format!("Cannot open sign-in window: {e}")))?;
 
@@ -86,6 +75,7 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
     std::thread::spawn(move || {
         let auth = app_handle.state::<AuthState>();
         let deadline = std::time::Instant::now() + Duration::from_millis(MAX_WAIT_MS);
+        let mut announced = false;
 
         loop {
             if cancelled_thread.load(Ordering::Relaxed) {
@@ -95,49 +85,51 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
                 break;
             }
             if std::time::Instant::now() > deadline {
+                let _ = app_handle.emit(
+                    "auth://error",
+                    serde_json::json!({ "message": "Sign-in window timed out. Try again." }),
+                );
                 break;
             }
+
             std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+            let _ = window.eval(READ_COOKIES_JS);
 
-            let _ = window.eval(EXTRACT_JS);
+            let (access, refresh) = read_session_cookies(&window);
 
-            let Ok(title) = window.title() else { continue };
-            let Some(encoded) = title.strip_prefix(TITLE_PREFIX) else {
-                continue;
-            };
-
-            match decode_payload(encoded) {
-                Ok((token, expires_in)) => {
-                    match adopt_token(token, expires_in) {
-                        Ok(session) => {
-                            // Keep the in-memory state in step with disk so the
-                            // very next command already sees the session.
-                            let _ = auth.set(session.clone());
-                            let _ = window.close();
-                            let _ = app_handle.emit(
-                                "auth://changed",
-                                serde_json::json!({
-                                    "signed_in": true,
-                                    "username": session.username,
-                                }),
-                            );
-                        }
-                        Err(err) => {
-                            let _ = app_handle.emit(
-                                "auth://error",
-                                serde_json::json!({ "message": err.message }),
-                            );
-                        }
+            if let Some(access_token) = access {
+                let _ = app_handle.emit(
+                    "auth://progress",
+                    serde_json::json!({ "message": "Confirmed. Reading your account…" }),
+                );
+                match adopt_tokens(access_token, refresh) {
+                    Ok(session) => {
+                        let _ = auth.set(session.clone());
+                        let _ = window.close();
+                        let _ = app_handle.emit(
+                            "auth://changed",
+                            serde_json::json!({
+                                "signed_in": true,
+                                "username": session.username,
+                            }),
+                        );
                     }
-                    break;
+                    Err(err) => {
+                        let _ = app_handle.emit(
+                            "auth://error",
+                            serde_json::json!({ "message": err.message }),
+                        );
+                    }
                 }
-                Err(err) => {
-                    let _ = app_handle.emit(
-                        "auth://error",
-                        serde_json::json!({ "message": err.message }),
-                    );
-                    break;
-                }
+                break;
+            }
+
+            if !announced {
+                announced = true;
+                let _ = app_handle.emit(
+                    "auth://progress",
+                    serde_json::json!({ "message": "Waiting for you to finish signing in…" }),
+                );
             }
         }
 
@@ -145,48 +137,64 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
             *running = false;
         }
         let _ = window.close();
+        let _ = app_handle.emit("auth://closed", serde_json::json!({}));
     });
 
     Ok(())
 }
 
-fn decode_payload(encoded: &str) -> AppResult<(String, Option<i64>)> {
-    use base64::Engine;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
-        .map_err(|e| AppError::internal(format!("Malformed sign-in payload: {e}")))?;
-    let value: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|e| AppError::internal(format!("Malformed sign-in payload: {e}")))?;
+/// Collects `auth.access_token` / `auth.refresh_token` from the webview cookie
+/// jar, falling back to the value the page reported through its title.
+fn read_session_cookies(window: &tauri::WebviewWindow) -> (Option<String>, Option<String>) {
+    let mut access = None;
+    let mut refresh = None;
 
-    let token = value
-        .get("t")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::internal("Sign-in payload had no token"))?
-        .to_string();
-    let expires_in = value
-        .get("e")
-        .and_then(|v| v.as_i64())
-        .filter(|secs| *secs > 0);
+    if let Ok(cookies) = window.cookies() {
+        for cookie in cookies {
+            match cookie.name() {
+                "auth.access_token" if !cookie.value().is_empty() => {
+                    access = Some(cookie.value().to_string());
+                }
+                "auth.refresh_token" if !cookie.value().is_empty() => {
+                    refresh = Some(cookie.value().to_string());
+                }
+                _ => {}
+            }
+        }
+    }
 
-    Ok((token, expires_in))
+    if access.is_none() {
+        if let Ok(title) = window.title() {
+            if let Some(payload) = title.strip_prefix("POAUTH:") {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                    access = value
+                        .get("a")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from);
+                    refresh = value.get("r").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        }
+    }
+
+    (access, refresh)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_a_captured_payload() {
-        use base64::Engine;
-        let json = r#"{"t":"abc.def.ghi","e":86400}"#;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
-        let (token, exp) = decode_payload(&encoded).unwrap();
-        assert_eq!(token, "abc.def.ghi");
-        assert_eq!(exp, Some(86400));
+/// Escape hatch for when the cookie jar is unreadable: the user can paste the
+/// value of `auth.access_token` from the browser's devtools.
+pub fn adopt_pasted_token(
+    access_token: String,
+    refresh_token: Option<String>,
+) -> AppResult<super::StoredSession> {
+    let token = access_token.trim().to_string();
+    if token.is_empty() {
+        return Err(AppError::invalid("That token is empty."));
     }
-
-    #[test]
-    fn rejects_garbage_payloads() {
-        assert!(decode_payload("not-base64!!").is_err());
-    }
+    adopt_tokens(
+        token,
+        refresh_token
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty()),
+    )
 }

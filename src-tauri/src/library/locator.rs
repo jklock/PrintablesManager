@@ -100,6 +100,7 @@ pub fn empty_metadata(model_id: &str) -> MetadataV1 {
             published_date: None,
         },
         description: String::new(),
+        remote_description_html: String::new(),
         cloned_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         files: Vec::new(),
         images: Vec::new(),

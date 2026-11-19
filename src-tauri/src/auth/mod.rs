@@ -1,12 +1,17 @@
 //! Printables account session handling.
 //!
-//! Printables authenticates through an Auth0 single-page application, so the
-//! API expects an `Authorization: Bearer <access_token>` header. We obtain that
-//! token by opening a real login window (so Google/Apple SSO and 2FA work
-//! exactly as they do on the website) and reading the token the page caches.
+//! printables.com authenticates with the Prusa Account OAuth service and keeps
+//! the result in two cookies on `www.printables.com`:
 //!
-//! The token is stored in the macOS Keychain, with a `0600` file fallback for
-//! ad-hoc-signed builds where Keychain access is unreliable.
+//!   * `auth.access_token`  — sent to the API as `Authorization: Bearer …`
+//!   * `auth.refresh_token` — exchanged at `POST /auth/refresh`
+//!
+//! Both were recovered from the site's own client bundle and verified against
+//! the live API (a bearer-less request to `me` returns 401; the API also
+//! accepts `credentials: include`). We therefore do not parse OAuth redirects:
+//! we let the user sign in in a real window and read the resulting cookies.
+//!
+//! Tokens live in the macOS Keychain, with a `0600` file fallback.
 
 pub mod login;
 
@@ -19,15 +24,91 @@ use std::sync::Mutex;
 
 const KEYCHAIN_SERVICE: &str = "dev.printablesoffline.app";
 const KEYCHAIN_ACCOUNT: &str = "printables-session";
+const KEYCHAIN_PROBE_ACCOUNT: &str = "keychain-selftest";
+const REFRESH_URL: &str = "https://www.printables.com/auth/refresh";
+
+/// Remembers why the last Keychain write fell back to a file, so the UI can
+/// say so instead of quietly storing a token on disk.
+static KEYCHAIN_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn note_keychain_error(message: Option<String>) {
+    if let Ok(mut slot) = KEYCHAIN_ERROR.lock() {
+        *slot = message;
+    }
+}
+
+pub fn keychain_error() -> Option<String> {
+    KEYCHAIN_ERROR.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Result of a real read/write/delete round-trip against the login Keychain.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeychainReport {
+    pub available: bool,
+    pub writable: bool,
+    pub readable: bool,
+    pub service: String,
+    pub error: Option<String>,
+}
+
+impl KeychainReport {
+    pub fn healthy(&self) -> bool {
+        self.available && self.writable && self.readable
+    }
+}
+
+/// Writes, reads back and deletes a throwaway item. This is the only honest
+/// way to know whether the Keychain works for *this* build's signature.
+pub fn keychain_selftest() -> KeychainReport {
+    let mut report = KeychainReport {
+        available: false,
+        writable: false,
+        readable: false,
+        service: KEYCHAIN_SERVICE.to_string(),
+        error: None,
+    };
+
+    let entry = match keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_PROBE_ACCOUNT) {
+        Ok(entry) => entry,
+        Err(err) => {
+            report.error = Some(format!("Keychain unavailable: {err}"));
+            note_keychain_error(report.error.clone());
+            return report;
+        }
+    };
+    report.available = true;
+
+    let probe = format!("ok-{}", uuid::Uuid::new_v4());
+    if let Err(err) = entry.set_password(&probe) {
+        report.error = Some(format!("Keychain write failed: {err}"));
+        note_keychain_error(report.error.clone());
+        return report;
+    }
+    report.writable = true;
+
+    match entry.get_password() {
+        Ok(value) if value == probe => report.readable = true,
+        Ok(_) => report.error = Some("Keychain returned a different value".to_string()),
+        Err(err) => report.error = Some(format!("Keychain read failed: {err}")),
+    }
+
+    let _ = entry.delete_credential();
+    note_keychain_error(report.error.clone());
+    report
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub access_token: String,
-    /// Unix seconds. `None` when the server did not report a lifetime.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Unix seconds, taken from the JWT `exp` when available.
     #[serde(default)]
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub username: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
     #[serde(default)]
     pub stored_at: String,
     #[serde(default)]
@@ -37,7 +118,7 @@ pub struct StoredSession {
 impl StoredSession {
     pub fn is_expired(&self) -> bool {
         match self.expires_at {
-            Some(exp) => chrono::Utc::now().timestamp() >= exp - 30,
+            Some(exp) => chrono::Utc::now().timestamp() >= exp - 60,
             None => false,
         }
     }
@@ -50,7 +131,11 @@ pub struct AuthStatus {
     pub username: Option<String>,
     pub expires_at: Option<i64>,
     pub expired: bool,
+    /// "keychain" | "file" | None when signed out.
     pub storage: Option<String>,
+    /// Set when the token had to be written outside the Keychain.
+    pub storage_warning: Option<String>,
+    pub can_refresh: bool,
 }
 
 pub struct AuthState {
@@ -79,12 +164,27 @@ impl AuthState {
                 expires_at: s.expires_at,
                 expired: s.is_expired(),
                 storage: Some(s.backend.clone()),
+                storage_warning: if s.backend == "keychain" {
+                    None
+                } else {
+                    keychain_error()
+                        .or_else(|| Some("The session is not in the Keychain.".to_string()))
+                },
+                can_refresh: s.refresh_token.is_some(),
             },
             None => AuthStatus::default(),
         }
     }
 
+    /// A usable token, refreshing once when it has expired.
     pub fn token(&self) -> Option<String> {
+        let expired = {
+            let guard = self.session.lock().ok()?;
+            guard.as_ref().map(|s| s.is_expired()).unwrap_or(false)
+        };
+        if expired {
+            let _ = self.refresh();
+        }
         let guard = self.session.lock().ok()?;
         guard
             .as_ref()
@@ -111,12 +211,155 @@ impl AuthState {
         *guard = None;
         Ok(())
     }
+
+    /// Called once at startup: silently renews an expired session from the
+    /// refresh token kept in the Keychain, so a signed-in user stays signed in.
+    pub fn restore(&self) -> AuthStatus {
+        let current = self.status();
+        if !current.signed_in && current.can_refresh {
+            let _ = self.refresh();
+        }
+        self.status()
+    }
+
+    /// Re-saves the current session, preferring the Keychain. Used by the
+    /// "Store in Keychain" retry after a fallback write.
+    pub fn promote_to_keychain(&self) -> AppResult<AuthStatus> {
+        let current = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| AppError::internal("Session lock poisoned"))?;
+            guard
+                .clone()
+                .ok_or_else(|| AppError::not_authenticated("Not signed in to Printables."))?
+        };
+
+        save_session(&current)?;
+        let backend = load_session()?
+            .map(|session| session.backend)
+            .unwrap_or_default();
+
+        let mut updated = current;
+        updated.backend = backend;
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| AppError::internal("Session lock poisoned"))?;
+        *guard = Some(updated);
+        drop(guard);
+        Ok(self.status())
+    }
+
+    /// Exchanges the refresh token for a new access token.
+    pub fn refresh(&self) -> AppResult<AuthStatus> {
+        let refresh_token = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| AppError::internal("Session lock poisoned"))?;
+            guard
+                .as_ref()
+                .and_then(|s| s.refresh_token.clone())
+                .ok_or_else(|| {
+                    AppError::not_authenticated("Session expired. Sign in to Printables again.")
+                })?
+        };
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| AppError::network(e.to_string()))?;
+
+        let resp = client
+            .post(REFRESH_URL)
+            .header(
+                reqwest::header::COOKIE,
+                format!("auth.refresh_token={refresh_token}"),
+            )
+            .header("accept", "application/json")
+            .send()
+            .map_err(|e| AppError::network(format!("Token refresh failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let _ = self.clear();
+            return Err(AppError::not_authenticated(
+                "Session expired. Sign in to Printables again.",
+            ));
+        }
+
+        // The endpoint may return JSON or refreshed Set-Cookie headers.
+        let headers = resp.headers().clone();
+        let body: serde_json::Value = resp.json().unwrap_or(serde_json::Value::Null);
+
+        let access = body
+            .pointer("/access_token")
+            .or_else(|| body.pointer("/accessToken"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| cookie_from_headers(&headers, "auth.access_token"));
+
+        let Some(access_token) = access else {
+            let _ = self.clear();
+            return Err(AppError::not_authenticated(
+                "Session expired. Sign in to Printables again.",
+            ));
+        };
+
+        let mut session = {
+            let guard = self
+                .session
+                .lock()
+                .map_err(|_| AppError::internal("Session lock poisoned"))?;
+            guard.clone().unwrap_or(StoredSession {
+                access_token: String::new(),
+                refresh_token: None,
+                expires_at: None,
+                username: None,
+                user_id: None,
+                stored_at: String::new(),
+                backend: String::new(),
+            })
+        };
+        session.expires_at = token_exp(&access_token);
+        session.access_token = access_token;
+        if let Some(new_refresh) = cookie_from_headers(&headers, "auth.refresh_token") {
+            session.refresh_token = Some(new_refresh);
+        }
+        self.set(session)?;
+        Ok(self.status())
+    }
 }
 
 impl Default for AuthState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Reads a token out of a `Set-Cookie` header without pulling in a cookie jar.
+fn cookie_from_headers(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    for value in headers.get_all(reqwest::header::SET_COOKIE).iter() {
+        let Ok(text) = value.to_str() else { continue };
+        let first = text.split(';').next().unwrap_or("");
+        if let Some((key, val)) = first.split_once('=') {
+            if key.trim() == name && !val.is_empty() {
+                return Some(val.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Reads the `exp` claim from a JWT. Returns `None` for opaque tokens.
+pub fn token_exp(token: &str) -> Option<i64> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    value.get("exp").and_then(|v| v.as_i64())
 }
 
 fn keychain_entry() -> AppResult<keyring::Entry> {
@@ -145,14 +388,23 @@ pub fn load_session() -> AppResult<Option<StoredSession>> {
 
 fn save_session(session: &StoredSession) -> AppResult<()> {
     let mut stored = session.clone();
+    let payload = serde_json::to_string(&stored)?;
 
-    if let Ok(entry) = keychain_entry() {
-        let payload = serde_json::to_string(&stored)?;
-        if entry.set_password(&payload).is_ok() {
-            stored.backend = "keychain".to_string();
-            // Keep a file copy only when the Keychain refused the write.
-            let _ = fs::remove_file(config::token_path()?);
-            return Ok(());
+    match keychain_entry() {
+        Ok(entry) => match entry.set_password(&payload) {
+            Ok(()) => {
+                stored.backend = "keychain".to_string();
+                note_keychain_error(None);
+                // A Keychain copy always wins: drop any older file copy.
+                let _ = fs::remove_file(config::token_path()?);
+                return Ok(());
+            }
+            Err(err) => {
+                note_keychain_error(Some(format!("Keychain write failed: {err}")));
+            }
+        },
+        Err(err) => {
+            note_keychain_error(Some(err.message.clone()));
         }
     }
 
@@ -185,13 +437,17 @@ fn delete_session() {
     }
 }
 
-/// Persist a freshly captured token and fill in the account name.
-pub fn adopt_token(access_token: String, expires_in: Option<i64>) -> AppResult<StoredSession> {
-    let expires_at = expires_in.map(|secs| chrono::Utc::now().timestamp() + secs);
+/// Persist freshly captured cookies and fill in the account identity.
+pub fn adopt_tokens(
+    access_token: String,
+    refresh_token: Option<String>,
+) -> AppResult<StoredSession> {
     let mut session = StoredSession {
+        expires_at: token_exp(&access_token),
         access_token,
-        expires_at,
+        refresh_token,
         username: None,
+        user_id: None,
         stored_at: chrono::Utc::now().to_rfc3339(),
         backend: String::new(),
     };
@@ -200,8 +456,9 @@ pub fn adopt_token(access_token: String, expires_in: Option<i64>) -> AppResult<S
     if let Ok(client) =
         crate::printables::api::PrintablesClient::with_token(Some(session.access_token.clone()))
     {
-        if let Ok(viewer) = client.viewer() {
-            session.username = viewer.public_username;
+        if let Ok(me) = client.viewer() {
+            session.username = me.public_username.or(me.handle);
+            session.user_id = me.user_id;
         }
     }
 
@@ -219,8 +476,10 @@ mod tests {
     fn expiry_is_evaluated_against_wall_clock() {
         let past = StoredSession {
             access_token: "t".into(),
+            refresh_token: None,
             expires_at: Some(chrono::Utc::now().timestamp() - 10),
             username: None,
+            user_id: None,
             stored_at: String::new(),
             backend: "file".into(),
         };
@@ -236,9 +495,40 @@ mod tests {
             expires_at: None,
             ..past
         };
-        assert!(
-            !unknown.is_expired(),
-            "unknown lifetime must not be treated as expired"
+        assert!(!unknown.is_expired());
+    }
+
+    #[test]
+    fn jwt_exp_is_read_from_the_payload() {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"exp":1893456000,"sub":"abc"}"#);
+        let token = format!("header.{payload}.sig");
+        assert_eq!(token_exp(&token), Some(1893456000));
+        assert_eq!(token_exp("opaque-token"), None);
+    }
+
+    #[test]
+    fn set_cookie_values_are_parsed() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "auth.access_token=abc.def.ghi; Path=/; HttpOnly"
+                .parse()
+                .unwrap(),
         );
+        headers.append(
+            reqwest::header::SET_COOKIE,
+            "auth.refresh_token=ref123; Path=/".parse().unwrap(),
+        );
+        assert_eq!(
+            cookie_from_headers(&headers, "auth.access_token").as_deref(),
+            Some("abc.def.ghi")
+        );
+        assert_eq!(
+            cookie_from_headers(&headers, "auth.refresh_token").as_deref(),
+            Some("ref123")
+        );
+        assert!(cookie_from_headers(&headers, "missing").is_none());
     }
 }

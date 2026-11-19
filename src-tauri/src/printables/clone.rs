@@ -431,6 +431,7 @@ where
         } else {
             remote_meta.description.clone()
         },
+        remote_description_html: remote_meta.raw_description.clone(),
         cloned_at: prev.cloned_at.clone(),
         files: downloaded,
         images,

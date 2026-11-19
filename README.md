@@ -110,13 +110,35 @@ synced to the website.
 | What | Where |
 |---|---|
 | Preferences | `~/Library/Application Support/dev.printablesoffline/prefs.json` |
-| Session | macOS Keychain (falls back to a `0600` file in the folder above) |
+| Session | your login Keychain (keychain item `dev.printablesoffline.app`) |
 | Library | your chosen folder, e.g. `…/Printables Offline Library/<id>-<slug>/` |
 | Collections | `<library>/collections.json` |
 | Bookkeeping | `<library>/.manager/` (sync state, capability report, push journal) |
 
 A 1.x `~/.printablesoffline/prefs.json` is migrated automatically on first launch and left behind as
 `prefs.json.migrated`.
+
+## Credentials
+
+The app never sees or stores your printables.com password. You sign in on the real website in its own
+window, so Google/Apple SSO, 2FA and the password you already have in iCloud Keychain all behave
+exactly as they do in Safari. What the app keeps is the resulting session token, in your **login
+Keychain**:
+
+- **Preferences → Account & credentials → Session storage** shows which store is in use, and
+  **Test Keychain** performs a real write/read/delete round-trip so you can see it work.
+- If macOS refuses the Keychain write (for example because an ad-hoc-signed build changed identity),
+  the token is kept in a `0600` file and the app *says so* — it never falls back silently. **Store in
+  Keychain** retries once you have approved the access prompt.
+- The refresh token is kept alongside the access token, so an expired session is renewed silently on
+  launch instead of asking you to sign in again.
+
+Because this build is signed ad-hoc rather than with a paid Apple Developer identity, macOS may show
+an "allow access to your keychain" prompt on the first write; choosing **Always Allow** keeps it away.
+Inline iCloud Keychain *autofill* inside a third-party webview is only available to apps with an
+associated-domains entitlement, so treat the sign-in window as a normal website login rather than an
+autofilling form.
+
 
 ## Build from source
 

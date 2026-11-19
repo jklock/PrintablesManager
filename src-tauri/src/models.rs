@@ -57,6 +57,10 @@ pub struct MetadataV1 {
     pub tags: Vec<String>,
     pub stats: ModelStats,
     pub description: String,
+    /// Raw HTML description exactly as printables.com served it. Used to tell a
+    /// real local edit (which should be pushed) from an untouched pull.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_description_html: String,
     pub cloned_at: String,
     pub files: Vec<MetadataFile>,
     pub images: Vec<MetadataImage>,
