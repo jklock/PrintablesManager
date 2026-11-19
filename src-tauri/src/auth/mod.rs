@@ -481,6 +481,12 @@ fn load_previous_keychain_session() -> Option<StoredSession> {
     Some(session)
 }
 
+/// Remove the stored session (used by the MCP server, which has no state).
+pub fn delete_stored_session() -> AppResult<()> {
+    delete_session();
+    Ok(())
+}
+
 fn delete_session() {
     if let Ok(entry) = keychain_entry() {
         let _ = entry.delete_credential();

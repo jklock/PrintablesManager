@@ -381,6 +381,61 @@ pub fn create_local_model(
     )
 }
 
+/// Copy explicit file paths into a model and register them. Shared by the
+/// folder picker and by the MCP server (which has no dialog).
+pub fn import_paths(
+    dir: &Path,
+    paths: &[PathBuf],
+) -> AppResult<(Vec<String>, Vec<String>, MetadataV1)> {
+    let files_dir = dir.join("files");
+    fs::create_dir_all(&files_dir)?;
+
+    let mut metadata = locator::read_metadata(dir)?;
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+
+    for source in paths {
+        let Some(raw_name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !source.is_file() {
+            skipped.push(format!("{raw_name}: not a file"));
+            continue;
+        }
+        let target_name = unique_name(&files_dir, &raw_name);
+        let target = files_dir.join(&target_name);
+        match fs::copy(source, &target) {
+            Ok(_) => {
+                let size = target.metadata().map(|m| m.len()).unwrap_or(0);
+                metadata.files.push(MetadataFile {
+                    name: target_name.clone(),
+                    kind: crate::printables::clone::kind_for_name(&target_name),
+                    size_bytes: size,
+                    local_path: format!("files/{target_name}"),
+                    remote_id: None,
+                });
+                imported.push(target_name);
+            }
+            Err(err) => skipped.push(format!("{raw_name}: {err}")),
+        }
+    }
+
+    if !imported.is_empty() {
+        metadata.files.sort_by(|a, b| a.name.cmp(&b.name));
+        locator::write_metadata(dir, &metadata)?;
+        commit(
+            dir,
+            &format!(
+                "Added {} file{}",
+                imported.len(),
+                if imported.len() == 1 { "" } else { "s" }
+            ),
+        )?;
+    }
+
+    Ok((imported, skipped, metadata))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
