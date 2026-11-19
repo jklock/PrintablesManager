@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Printables Offline",
+  "productName": "Printables Manager",
   "version": "2.0.0",
-  "identifier": "dev.printablesoffline.app",
+  "identifier": "dev.printablesmanager.app",
   "build": {
     "frontendDist": "../ui/dist"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Printables Offline",
+        "title": "Printables Manager",
         "minWidth": 1024,
         "minHeight": 720,
         "resizable": true,
@@ -37,6 +37,7 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns"
     ],
     "macOS": {

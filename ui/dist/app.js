@@ -1,5 +1,5 @@
 /* ============================================================================
- * app.js — Printables Offline frontend
+ * app.js — Printables Manager frontend
  * ============================================================================
  * Wires the UI to the real Tauri backend via window.__TAURI__.core.invoke.
  * Uses localStorage for theme/slicer prefs (po.theme, po.slicer) and syncs
@@ -1805,7 +1805,7 @@ async function init() {
     refreshRemoteModels().then(actSyncAll);
   }
 
-  console.info('%cPrintables Offline%c — Tauri IPC active.', 'font-weight:700;color:#FF5701', '');
+  console.info('%cPrintables Manager%c — Tauri IPC active.', 'font-weight:700;color:#FF5701', '');
 }
 
 init();

@@ -167,7 +167,7 @@ impl Default for CollectionsFile {
 }
 
 /// Preferences, stored as JSON at
-/// `~/Library/Application Support/dev.printablesoffline/prefs.json`.
+/// `~/Library/Application Support/dev.printablesmanager/prefs.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPrefs {
     pub theme: String,      // "light" | "dark" | "system"

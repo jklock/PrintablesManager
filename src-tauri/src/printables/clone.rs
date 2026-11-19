@@ -585,7 +585,7 @@ mod tests {
             return;
         }
         let temp_dir = std::env::temp_dir().join(format!(
-            "printables_offline_pull_test_{}",
+            "printables_manager_pull_test_{}",
             uuid::Uuid::new_v4()
         ));
         fs::create_dir_all(&temp_dir).unwrap();

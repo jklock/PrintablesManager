@@ -1,14 +1,14 @@
-# Printables Offline
+# Printables Manager
 
 **Version 2.0 — a macOS-only, account-aware, two-way library for your own Printables.com models.**
 
-Printables Offline keeps a real copy of your 3D models on your Mac: the files, the images, the
+Printables Manager keeps a real copy of your 3D models on your Mac: the files, the images, the
 description, the tags — and the entire edit history of every model folder, tracked in git.
 
-> 2.0 is a substantial change of direction. 1.x was an anonymous, read-only, one-model-at-a-time
-> downloader. 2.0 signs in to your Printables account, syncs every model you authored, puts each
-> model folder under version control, and can push reviewed local edits back to the website.
-> Windows support was removed in 2.0 — this is a macOS app.
+> A new app, built on the remains of Printables Offline. 1.x was an anonymous, read-only,
+> one-model-at-a-time downloader. 2.0 signs in to your Printables account, syncs every model you
+> authored, puts each model folder under version control, and can push reviewed local edits back to
+> the website. Windows support was removed — this is a macOS app.
 
 ---
 
@@ -31,15 +31,15 @@ description, the tags — and the entire edit history of every model folder, tra
 
 ## Install
 
-Download the latest `.dmg` from [Releases](../../releases), open it, and drag **Printables Offline.app**
+Download the latest `.dmg` from [Releases](../../releases), open it, and drag **Printables Manager.app**
 to your Applications folder.
 
 Because the app is open source and not signed with a paid Apple Developer account, macOS Gatekeeper
 blocks the first launch:
 
-1. Try to open **Printables Offline.app** and let Gatekeeper block it.
+1. Try to open **Printables Manager.app** and let Gatekeeper block it.
 2. Open **System Settings → Privacy & Security**.
-3. Click **Open Anyway** next to the Printables Offline notice.
+3. Click **Open Anyway** next to the Printables Manager notice.
 4. Confirm **Open**.
 
 You only do this once.
@@ -47,7 +47,7 @@ You only do this once.
 ## First run
 
 1. **Preferences → Storage → Library folder** — pick where models should live. The app creates a
-   `Printables Offline Library` folder inside your choice.
+   `Printables Manager Library` folder inside your choice.
 2. **Preferences → Slicer** — pick PrusaSlicer, OrcaSlicer, Bambu Studio or UltiMaker Cura.
 3. **Sign in** from the sidebar account strip (or **My Models**).
 4. **My Models → Sync all models**.
@@ -109,14 +109,16 @@ synced to the website.
 
 | What | Where |
 |---|---|
-| Preferences | `~/Library/Application Support/dev.printablesoffline/prefs.json` |
-| Session | your login Keychain (keychain item `dev.printablesoffline.app`) |
-| Library | your chosen folder, e.g. `…/Printables Offline Library/<id>-<slug>/` |
+| Preferences | `~/Library/Application Support/dev.printablesmanager/prefs.json` |
+| Session | your login Keychain (item `dev.printablesmanager.app`) |
+| Library | your chosen folder, e.g. `…/Printables Manager Library/<id>-<slug>/` |
 | Collections | `<library>/collections.json` |
 | Bookkeeping | `<library>/.manager/` (sync state, capability report, push journal) |
 
-A 1.x `~/.printablesoffline/prefs.json` is migrated automatically on first launch and left behind as
-`prefs.json.migrated`.
+Preferences are migrated on first launch from either older location — the pre-rename 2.0 build
+(`dev.printablesoffline`) or 1.x (`~/.printablesoffline`) — and the original is left behind renamed to
+`prefs.json.migrated`. A session saved by an older build is adopted from its old Keychain item, so the
+rename does not sign you out.
 
 ## Credentials
 

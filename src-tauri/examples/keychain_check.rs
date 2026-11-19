@@ -7,7 +7,7 @@
 //! Nothing secret is written: the item is created, read back and deleted.
 
 fn main() {
-    let report = printables_offline::auth::keychain_selftest();
+    let report = printables_manager::auth::keychain_selftest();
 
     println!("service : {}", report.service);
     println!("available: {}", report.available);

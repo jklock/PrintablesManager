@@ -22,7 +22,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-const KEYCHAIN_SERVICE: &str = "dev.printablesoffline.app";
+const KEYCHAIN_SERVICE: &str = "dev.printablesmanager.app";
+/// Item written by the build that was still called "Printables Offline".
+const KEYCHAIN_SERVICE_PREVIOUS: &str = "dev.printablesoffline.app";
 const KEYCHAIN_ACCOUNT: &str = "printables-session";
 const KEYCHAIN_PROBE_ACCOUNT: &str = "keychain-selftest";
 const REFRESH_URL: &str = "https://www.printables.com/auth/refresh";
@@ -376,6 +378,13 @@ pub fn load_session() -> AppResult<Option<StoredSession>> {
         }
     }
 
+    // A session saved before the rename lives under the previous service name;
+    // adopt it and move it to the new item so the user stays signed in.
+    if let Some(session) = load_previous_keychain_session() {
+        let _ = save_session(&session);
+        return Ok(Some(session));
+    }
+
     let path = config::token_path()?;
     if !path.exists() {
         return Ok(None);
@@ -428,8 +437,19 @@ fn write_private_file(path: &Path, contents: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn load_previous_keychain_session() -> Option<StoredSession> {
+    let entry = keyring::Entry::new(KEYCHAIN_SERVICE_PREVIOUS, KEYCHAIN_ACCOUNT).ok()?;
+    let secret = entry.get_password().ok()?;
+    let mut session: StoredSession = serde_json::from_str(&secret).ok()?;
+    session.backend = "keychain".to_string();
+    Some(session)
+}
+
 fn delete_session() {
     if let Ok(entry) = keychain_entry() {
+        let _ = entry.delete_credential();
+    }
+    if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE_PREVIOUS, KEYCHAIN_ACCOUNT) {
         let _ = entry.delete_credential();
     }
     if let Ok(path) = config::token_path() {

@@ -1,4 +1,4 @@
-//! Printables Offline 2.0 — macOS-only, account-aware, git-backed library.
+//! Printables Manager 2.0 — macOS-only, account-aware, git-backed library.
 
 mod commands;
 mod config;

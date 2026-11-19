@@ -1,7 +1,10 @@
 //! Preferences: read, merge, persist.
 //!
-//! 2.0 stores prefs at `~/Library/Application Support/dev.printablesoffline/`
-//! and migrates a 1.x `~/.printablesoffline/prefs.json` on first run.
+//! Preferences: read, merge, persist.
+//!
+//! Stored at `~/Library/Application Support/dev.printablesmanager/`, with a
+//! one-shot migration from the pre-rename 2.0 folder and from 1.x's
+//! `~/.printablesoffline/prefs.json`.
 
 use crate::config;
 use crate::error::{AppError, AppResult};
@@ -80,19 +83,22 @@ pub fn set_prefs(
     Ok(prefs)
 }
 
-/// Chosen folder becomes `<folder>/Printables Offline Library` unless it is
-/// already named that. Kept from 1.x so existing libraries keep working.
+/// Chosen folder becomes `<folder>/Printables Manager Library` unless it is
+/// already a library folder. The 1.x/2.0 name is still accepted, so an existing
+/// library is never nested inside a second one.
 fn normalize_library_folder(selected: &str) -> AppResult<PathBuf> {
+    const LIBRARY_NAMES: [&str; 2] = ["Printables Manager Library", "Printables Offline Library"];
+
     let path = PathBuf::from(selected);
     let is_library = path
         .file_name()
-        .map(|n| n.to_string_lossy() == "Printables Offline Library")
+        .map(|n| LIBRARY_NAMES.contains(&n.to_string_lossy().as_ref()))
         .unwrap_or(false);
 
     let lib = if is_library {
         path
     } else {
-        path.join("Printables Offline Library")
+        path.join("Printables Manager Library")
     };
 
     std::fs::create_dir_all(&lib)

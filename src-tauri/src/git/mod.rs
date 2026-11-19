@@ -14,8 +14,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
-const DEFAULT_AUTHOR_NAME: &str = "Printables Offline";
-const DEFAULT_AUTHOR_EMAIL: &str = "sync@printablesoffline.local";
+const DEFAULT_AUTHOR_NAME: &str = "Printables Manager";
+const DEFAULT_AUTHOR_EMAIL: &str = "sync@printablesmanager.local";
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct GitStatus {
@@ -357,7 +357,7 @@ pub fn ensure_initialised(model_dir: &Path) -> AppResult<Option<String>> {
     open(model_dir, true)?;
     commit_all(
         model_dir,
-        "Initial import (adopted into version control by Printables Offline 2.0)",
+        "Initial import (adopted into version control by Printables Manager 2.0)",
     )
 }
 

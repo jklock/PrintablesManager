@@ -1,3 +1,3 @@
 fn main() {
-    printables_offline::run()
+    printables_manager::run()
 }
