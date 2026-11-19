@@ -66,6 +66,14 @@ pub struct RemoteImage {
     pub kind: String,
 }
 
+/// Enough of a model to show it before it is downloaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPreview {
+    pub id: String,
+    pub name: String,
+    pub thumbnail: Option<String>,
+}
+
 /// One collection as it exists on printables.com.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteCollection {
@@ -823,6 +831,60 @@ impl PrintablesClient {
             // stops adding anything new.
             if items.len() < 100 || out.len() == before {
                 break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Thumbnail URL + name for a batch of model ids, using aliased `print`
+    /// queries so a whole collection costs one request.
+    pub fn model_previews(&self, ids: &[String]) -> AppResult<Vec<ModelPreview>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        for chunk in ids.chunks(25) {
+            let mut fields = String::new();
+            for (i, id) in chunk.iter().enumerate() {
+                fields.push_str(&format!(
+                    "p{i}: print(id: {id:?}) {{ id name images {{ filePath __typename }} __typename }} "
+                ));
+            }
+            let query = format!("query Previews {{ {fields} }}");
+            let data = self.post_graphql(&json!({
+                "operationName": "Previews",
+                "query": query,
+                "variables": {}
+            }))?;
+
+            let Some(map) = data.get("data").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for value in map.values() {
+                if value.is_null() {
+                    continue;
+                }
+                let Some(id) = value.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let file_path = value
+                    .pointer("/images/0/filePath")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                out.push(ModelPreview {
+                    id: id.to_string(),
+                    name: value
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    thumbnail: if file_path.is_empty() {
+                        None
+                    } else {
+                        Some(format!("https://media.printables.com/{file_path}"))
+                    },
+                });
             }
         }
         Ok(out)

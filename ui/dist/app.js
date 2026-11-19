@@ -331,7 +331,21 @@ function openCollection(id) {
   state.activeCollectionId = id;
   state.search = '';
   state.filter = 'all';
+  state.collectionPreviews = [];
   showView('library');
+  loadCollectionPreviews(id);
+}
+
+/** Remote members of a collection, with their printables.com thumbnails. */
+async function loadCollectionPreviews(id) {
+  try {
+    const previews = await Bridge.call('collection_previews', { collectionId: id });
+    if (state.activeCollectionId !== id) return;
+    state.collectionPreviews = Array.isArray(previews) ? previews : [];
+    renderLibrary();
+  } catch (err) {
+    console.warn('collection previews unavailable:', err);
+  }
 }
 
 async function refreshCollections() {
@@ -526,17 +540,43 @@ function renderLibrary() {
   const list = filteredModels();
   const grid = $('#grid'), empty = $('#empty'), emptyLib = $('#empty-library');
 
+  const remoteCards = state.activeCollectionId
+    ? (state.collectionPreviews || [])
+        .filter(p => !state.models.some(m => m.id === p.id))
+        .map(p => `
+          <article class="card is-remote">
+            <div class="card-thumb">
+              ${p.thumbnail
+                ? `<img class="thumb-img" src="${esc(p.thumbnail)}" alt="${esc(p.name)}" loading="lazy"
+                     onerror="this.classList.add('hidden');this.parentElement.classList.add('is-missing')" />`
+                : ''}
+              <span class="remote-badge">on printables</span>
+            </div>
+            <div class="card-body">
+              <h3 class="card-title">${esc(p.name || p.id)}</h3>
+              <div class="card-actions">
+                <button class="btn btn-primary btn-sm" data-download-remote="${esc(p.id)}">Download</button>
+              </div>
+            </div>
+          </article>`).join('')
+    : '';
+
   if (state.activeCollectionId) {
     const coll = state.collections.find(c => c.id === state.activeCollectionId);
     const total = (coll && coll.model_ids || []).length;
     const localCount = (coll && coll.model_ids || []).filter(id => state.models.some(m => m.id === id)).length;
-    if (list.length === 0) {
+    if (list.length === 0 && !remoteCards) {
       grid.innerHTML = '';
       empty.classList.add('hidden');
       emptyLib.classList.remove('hidden');
       const heading = emptyLib.querySelector('h3');
       const body = emptyLib.querySelector('p');
-      if (heading) heading.textContent = `${coll ? coll.name : 'This collection'} has nothing local yet`;
+      if (remoteCards) {
+      grid.innerHTML = remoteCards;
+      emptyLib.classList.add('hidden');
+      return;
+    }
+    if (heading) heading.textContent = `${coll ? coll.name : 'This collection'} has nothing local yet`;
       if (body) body.textContent = total === 0
         ? 'Printables has not returned the models in this collection yet — press the download arrow in the Collections header to refresh it.'
         : `${total - localCount} of ${total} model(s) are not downloaded. Use Download all to fetch them.`;
@@ -551,8 +591,8 @@ function renderLibrary() {
     empty.classList.add('hidden');
     emptyLib.classList.remove('hidden');
   } else {
-    grid.innerHTML = list.map(cardHTML).join('');
-    empty.classList.toggle('hidden', list.length > 0);
+    grid.innerHTML = list.map(cardHTML).join('') + remoteCards;
+    empty.classList.toggle('hidden', list.length > 0 || !!remoteCards);
     emptyLib.classList.add('hidden');
   }
 
@@ -2056,6 +2096,23 @@ $('#maint-rescan').addEventListener('click', () => {
 
 /* account & sync */
 $('#account-action').addEventListener('click', () => authSignedIn() ? actLogout() : actLogin());
+$('#grid').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-download-remote]');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Downloading…';
+  try {
+    await Bridge.call('sync_model', { modelId: btn.dataset.downloadRemote });
+    await refreshLibrary();
+    await loadCollectionPreviews(state.activeCollectionId);
+    renderLibrary();
+    toast('Downloaded', btn.dataset.downloadRemote);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Download';
+    toast('Download failed', err.message || err);
+  }
+});
 $('#remote-grid').addEventListener('click', e => {
   const syncBtn = e.target.closest('[data-remote-sync]');
   if (syncBtn) { actSyncModel(syncBtn.dataset.remoteSync); return; }

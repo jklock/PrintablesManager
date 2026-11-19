@@ -430,3 +430,39 @@ mod tests {
         assert_eq!(data.collections[0].model_ids, vec!["42".to_string()]);
     }
 }
+
+/// Models in a collection that are not local yet, with their site thumbnails,
+/// so the grid can show them before anything is downloaded.
+#[tauri::command]
+pub fn collection_previews(
+    prefs: State<'_, Mutex<AppPrefs>>,
+    auth: State<'_, crate::auth::AuthState>,
+    args: SyncCollectionArgs,
+) -> Result<Vec<crate::printables::api::ModelPreview>, String> {
+    let snapshot = prefs.lock().map(|p| p.clone()).map_err(|e| e.to_string())?;
+    let lib_dir = library_dir(&snapshot)?;
+    let data = load_collections(&lib_dir);
+    let collection = data
+        .collections
+        .iter()
+        .find(|c| c.id == args.collection_id)
+        .ok_or_else(|| "Collection not found.".to_string())?;
+
+    let remote: Vec<String> = collection
+        .model_ids
+        .iter()
+        .filter(|id| crate::library::locator::try_find_model_dir(&lib_dir, id).is_none())
+        .cloned()
+        .collect();
+
+    if remote.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let token = auth
+        .token()
+        .ok_or_else(|| "Sign in to Printables to preview this collection.".to_string())?;
+    let client =
+        crate::printables::api::PrintablesClient::with_token(Some(token)).map_err(|e| e.message)?;
+    client.model_previews(&remote).map_err(|e| e.message)
+}

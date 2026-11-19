@@ -114,6 +114,7 @@ pub fn run() {
             commands::collections::remove_model_from_collection,
             commands::collections::import_site_collections,
             commands::collections::sync_collection,
+            commands::collections::collection_previews,
             // prefs
             commands::prefs::get_prefs,
             commands::prefs::set_prefs,
