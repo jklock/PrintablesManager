@@ -756,17 +756,20 @@ impl PrintablesClient {
     /// Model ids inside one printables.com collection.
     /// Captured from the site's own `CollectionModels` document.
     pub fn collection_model_ids(&self, collection_id: &str) -> AppResult<Vec<String>> {
+        // Recovered from the site's own request while opening a collection:
+        // every one of these arguments is required, and `ordering` must be a
+        // valid CollectionPrintsOrderingEnum value or the server 500s with
+        // "Cannot resolve keyword 'new_uploads' into field".
         let query = r#"
-        query CollectionModels($collectionId: ID!, $limit: Int) {
-          moreCollectionModels(collectionId: $collectionId, limit: $limit) {
-            items {
-              id
-              model {
-                id
-                __typename
-              }
-              __typename
-            }
+        query CollectionModels(
+          $collectionId: ID!, $limit: Int, $cursor: String,
+          $ordering: CollectionPrintsOrderingEnum, $includeDeleted: Boolean, $search: String
+        ) {
+          moreCollectionModels(
+            limit: $limit, cursor: $cursor, collectionId: $collectionId,
+            ordering: $ordering, includeDeleted: $includeDeleted, query: $search
+          ) {
+            items { id model: print { id __typename } __typename }
             __typename
           }
         }
@@ -777,14 +780,17 @@ impl PrintablesClient {
             let payload = json!({
                 "operationName": "CollectionModels",
                 "query": query,
-                "variables": { "collectionId": collection_id, "limit": 100 }
+                "variables": {
+                    "collectionId": collection_id,
+                    "limit": 100,
+                    "cursor": null,
+                    "ordering": "added_to_collection",
+                    "includeDeleted": false,
+                    "search": ""
+                }
             });
             let data = self.post_graphql(&payload)?;
 
-            // A GraphQL error here means the membership query is malformed (the
-            // server rejects it unless every argument the site sends is present).
-            // Returning an empty list would silently claim the collection is
-            // empty, which is exactly the bug this replaces.
             if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
                 if !errors.is_empty() {
                     let first = errors[0]
@@ -803,6 +809,7 @@ impl PrintablesClient {
             else {
                 break;
             };
+
             let before = out.len();
             for item in items {
                 if let Some(id) = item.pointer("/model/id").and_then(|v| v.as_str()) {
@@ -811,7 +818,9 @@ impl PrintablesClient {
                     }
                 }
             }
-            // No cursor in this document: stop when a page adds nothing new.
+
+            // No output cursor is exposed by this document; stop when a page
+            // stops adding anything new.
             if items.len() < 100 || out.len() == before {
                 break;
             }
