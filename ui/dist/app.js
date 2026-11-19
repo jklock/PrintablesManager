@@ -1383,6 +1383,23 @@ function wireSyncSettings() {
     });
   }
 
+  const backup = $('#backup-icloud');
+  if (backup) {
+    backup.addEventListener('click', async () => {
+      const status = $('#backup-status');
+      status.textContent = 'Copying git history to iCloud…';
+      try {
+        const r = await Bridge.call('backup_to_icloud', {});
+        const mb = Math.round((r.bytes || 0) / 1048576);
+        status.textContent = `Backed up ${r.models} model(s), ${mb} MB → ${r.destination}`;
+        toast('Backed up to iCloud', `${r.models} models · ${mb} MB`);
+      } catch (err) {
+        status.textContent = err.message || String(err);
+        toast('Backup failed', err.message || err);
+      }
+    });
+  }
+
   const slicerTest = $('#slicer-test');
   if (slicerTest) {
     slicerTest.addEventListener('click', async () => {

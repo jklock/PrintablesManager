@@ -204,3 +204,30 @@ is not affiliated with or endorsed by Prusa Research.
 ## License
 
 See [LICENSE](LICENSE).
+
+## MCP server
+
+The app ships a second binary that speaks the Model Context Protocol over stdio,
+so an agent can inspect and edit the library without the GUI:
+
+```json
+{
+  "mcpServers": {
+    "printables-manager": {
+      "command": "/Applications/Printables Manager.app/Contents/MacOS/printables-manager-mcp"
+    }
+  }
+}
+```
+
+Tools: `list_models`, `get_model`, `update_model_details`, `list_collections`,
+`backup_to_icloud`. Everything is local; `update_model_details` writes
+`metadata.json` and commits to that model's git repository.
+
+## iCloud backup
+
+**Preferences → Version control & sync → Back up now** mirrors each model's
+`.git` directory plus `metadata.json` into
+`iCloud Drive/Printables Manager Backups/<model-id>/`. It is a mirror, not a
+pile of timestamped copies, so iCloud only uploads what changed. The history is
+the valuable part — `files/` and `images/` are already inside `.git`.

@@ -753,6 +753,55 @@ impl PrintablesClient {
             .collect())
     }
 
+    /// Model ids inside one printables.com collection.
+    /// Captured from the site's own `CollectionModels` document.
+    pub fn collection_model_ids(&self, collection_id: &str) -> AppResult<Vec<String>> {
+        let query = r#"
+        query CollectionModels($collectionId: ID!, $limit: Int) {
+          moreCollectionModels(collectionId: $collectionId, limit: $limit) {
+            items {
+              id
+              model {
+                id
+                __typename
+              }
+              __typename
+            }
+            __typename
+          }
+        }
+        "#;
+
+        let mut out: Vec<String> = Vec::new();
+        for _ in 0..20 {
+            let payload = json!({
+                "operationName": "CollectionModels",
+                "query": query,
+                "variables": { "collectionId": collection_id, "limit": 100 }
+            });
+            let data = self.post_graphql(&payload)?;
+            let Some(items) = data
+                .pointer("/data/moreCollectionModels/items")
+                .and_then(|v| v.as_array())
+            else {
+                break;
+            };
+            let before = out.len();
+            for item in items {
+                if let Some(id) = item.pointer("/model/id").and_then(|v| v.as_str()) {
+                    if !out.iter().any(|existing| existing == id) {
+                        out.push(id.to_string());
+                    }
+                }
+            }
+            // No cursor in this document: stop when a page adds nothing new.
+            if items.len() < 100 || out.len() == before {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     // --------------------------------------------------------------- transfer
 
     /// Downloads `url` into `dest` atomically (`.part` then rename).

@@ -12,6 +12,8 @@ mod sync;
 
 // Diagnostics (`examples/keychain_check.rs`) reach into the real session code.
 pub mod auth;
+pub mod backup;
+pub mod mcp;
 
 /// `Printables Manager --selftest`: prints what the app can actually do on this
 /// machine. Used for support and for verifying a freshly installed bundle.
@@ -116,6 +118,7 @@ pub fn run() {
             commands::prefs::set_prefs,
             commands::prefs::open_config_folder,
             commands::prefs::ui_ready,
+            backup::backup_to_icloud,
             // shell / integrations
             commands::dialogs::dialog_open,
             commands::slicer::open_in_slicer,

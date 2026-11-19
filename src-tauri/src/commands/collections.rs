@@ -239,6 +239,17 @@ pub fn upsert_site_collections(
     changed
 }
 
+/// Replace a site collection's membership with the ids from the API.
+pub fn apply_membership(data: &mut CollectionsFile, site_id: &str, ids: Vec<String>) -> bool {
+    let key = format!("site-{site_id}");
+    let Some(collection) = data.collections.iter_mut().find(|c| c.id == key) else {
+        return false;
+    };
+    collection.model_ids = ids;
+    collection.updated_at = now_iso();
+    true
+}
+
 /// Pull the collections that exist on printables.com into the sidebar.
 #[tauri::command]
 pub fn import_site_collections(
@@ -263,6 +274,15 @@ pub fn import_site_collections(
 
     let mut data = load_collections(&lib_dir);
     upsert_site_collections(&mut data, &site);
+
+    // Membership: without it a collection opens empty, which is not a
+    // collection at all. One request per collection.
+    for remote in &site {
+        if let Ok(ids) = client.collection_model_ids(&remote.id) {
+            apply_membership(&mut data, &remote.id, ids);
+        }
+    }
+
     save_collections(&lib_dir, &data)?;
     Ok(data.collections)
 }
@@ -306,6 +326,28 @@ mod tests {
         assert_eq!(data.collections.len(), 1);
         assert_eq!(data.collections[0].name, "Glock 17");
         assert_eq!(data.collections[0].site_count, Some(13));
+    }
+
+    #[test]
+    fn membership_is_replaced_not_merged() {
+        let mut data = CollectionsFile::default();
+        upsert_site_collections(&mut data, &[site("7", "Glock", 2)]);
+        assert!(apply_membership(
+            &mut data,
+            "7",
+            vec!["1".into(), "2".into()]
+        ));
+        assert_eq!(
+            data.collections[0].model_ids,
+            vec!["1".to_string(), "2".to_string()]
+        );
+
+        // A later import that no longer lists model 1 must drop it.
+        apply_membership(&mut data, "7", vec!["2".into()]);
+        assert_eq!(data.collections[0].model_ids, vec!["2".to_string()]);
+
+        // Unknown collections are ignored rather than invented.
+        assert!(!apply_membership(&mut data, "nope", vec!["9".into()]));
     }
 
     #[test]

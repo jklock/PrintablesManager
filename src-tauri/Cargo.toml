@@ -30,6 +30,14 @@ keyring = { version = "3", features = ["apple-native"] }
 sha2 = "0.10"
 base64 = "0.22"
 
+[[bin]]
+name = "printables-manager"
+path = "src/main.rs"
+
+[[bin]]
+name = "printables-manager-mcp"
+path = "src/bin/printables_mcp.rs"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
