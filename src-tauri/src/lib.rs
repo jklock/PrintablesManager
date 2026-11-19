@@ -179,10 +179,19 @@ pub fn run() {
                 };
             }
 
-            if let Some(lib_path) = &prefs.library_folder {
-                if let Ok(path) = std::path::PathBuf::from(lib_path).canonicalize() {
-                    let _ = app.asset_protocol_scope().allow_directory(&path, true);
-                }
+            // Never touch the library path during setup. `allow_directory`
+            // resolves the path internally, and when the library sits on an
+            // external volume macOS blocks that first touch behind a "access
+            // files on a removable volume" prompt - which froze setup() and left
+            // the window blank, with the dialog hidden behind it. Widen the
+            // asset scope on a worker thread so the UI always paints.
+            if let Some(lib_path) = prefs.library_folder.clone() {
+                let scope_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    let _ = scope_app
+                        .asset_protocol_scope()
+                        .allow_directory(std::path::Path::new(&lib_path), true);
+                });
             }
 
             // Bring pre-2.0 model folders under version control, off the UI thread.

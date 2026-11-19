@@ -28,7 +28,21 @@ pub fn index_library_with(
         ));
     }
 
-    let dirs = locator::model_dirs(library_dir).map_err(|e| e.message)?;
+    let dirs = locator::model_dirs(library_dir).map_err(|e| {
+        // An external/removable library needs one macOS consent click. Say so
+        // instead of surfacing a bare "Operation not permitted".
+        let message = e.message;
+        if message.contains("Operation not permitted") || message.contains("Permission denied") {
+            format!(
+                "macOS is blocking access to {}. Answer Allow on the system prompt \
+                 (or grant it in System Settings -> Privacy & Security -> Files and Folders), \
+                 then rescan.",
+                library_dir.display()
+            )
+        } else {
+            message
+        }
+    })?;
     let mut models: Vec<ModelSummary> = Vec::new();
     let mut total_files: usize = 0;
     let mut total_bytes: u64 = 0;
