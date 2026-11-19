@@ -1,10 +1,15 @@
+//! `export_files`: copy a model's files out of the library.
+
+use crate::config;
+use crate::error::{AppError, AppResult};
+use crate::library::locator;
+use crate::models::AppPrefs;
 use serde::Deserialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
-use crate::models::AppPrefs;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,52 +23,27 @@ pub struct ExportResult {
     pub copied: usize,
 }
 
-/// Resolve the absolute path of one model's directory by walking the library.
-fn model_dir_from_id(prefs: &AppPrefs, model_id: &str) -> Result<PathBuf, String> {
-    let lib = prefs
-        .library_folder
-        .as_ref()
-        .ok_or("Library folder not configured. Set it in Preferences first.")?;
-    let lib_path = Path::new(lib);
-
-    for entry in fs::read_dir(lib_path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let meta_path = entry.path().join("metadata.json");
-        if !meta_path.exists() {
-            continue;
-        }
-        let Ok(raw) = fs::read_to_string(&meta_path) else {
-            continue;
-        };
-        let Ok(meta) = serde_json::from_str::<crate::models::MetadataV1>(&raw) else {
-            continue;
-        };
-        if meta.model_id == model_id {
-            return Ok(entry.path());
-        }
-    }
-
-    Err(format!("Model not found in library: {model_id}"))
-}
-
-/// Copy the model's files out of the library to a user-chosen folder.
-/// Shows a native folder picker, copies files/ + images/, then reveals the destination.
 #[tauri::command]
 pub async fn export_files(
     app: tauri::AppHandle,
     args: ExportArgs,
     prefs: State<'_, Mutex<AppPrefs>>,
-) -> Result<ExportResult, String> {
+) -> AppResult<ExportResult> {
     use tauri_plugin_opener::OpenerExt;
 
-    let prefs = prefs.lock().map_err(|e| e.to_string())?;
-    let src_dir = model_dir_from_id(&prefs, &args.model_id)?;
+    let snapshot = {
+        let prefs = prefs
+            .lock()
+            .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
+        prefs.clone()
+    };
+    let library = config::library_dir(&snapshot)?;
+    let src_dir = locator::find_model_dir(&library, &args.model_id)?;
     let model_name = src_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| args.model_id.clone());
 
-    // Native folder picker (async — runs on background thread)
     let (tx, rx) = std::sync::mpsc::channel();
     app.dialog()
         .file()
@@ -71,40 +51,38 @@ pub async fn export_files(
         .pick_folder(move |path| {
             let _ = tx.send(path);
         });
-    let dest = rx.recv().map_err(|e| e.to_string())?.ok_or("Export cancelled.")?;
+    let dest = rx
+        .recv()
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::invalid("Export cancelled."))?;
     let dest_path = PathBuf::from(dest.to_string());
 
     let target_dir = dest_path.join(&model_name);
-    fs::create_dir_all(&target_dir).map_err(|e| format!("Cannot create export folder: {e}"))?;
+    fs::create_dir_all(&target_dir)
+        .map_err(|e| AppError::io(format!("Cannot create export folder: {e}")))?;
 
-    let mut copied = 0;
+    let mut copied = 0usize;
     for sub in ["files", "images"] {
         let src_sub = src_dir.join(sub);
         if !src_sub.is_dir() {
             continue;
         }
         let dst_sub = target_dir.join(sub);
-        fs::create_dir_all(&dst_sub).map_err(|e| e.to_string())?;
-        for entry in fs::read_dir(&src_sub).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let file_type = entry.file_type().map_err(|e| e.to_string())?;
-            if file_type.is_file() {
-                let dst = dst_sub.join(entry.file_name());
-                fs::copy(entry.path(), &dst).map_err(|e| {
-                    format!("Failed copying {}: {e}", entry.path().display())
-                })?;
+        fs::create_dir_all(&dst_sub)?;
+        for entry in fs::read_dir(&src_sub)?.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                fs::copy(&path, dst_sub.join(entry.file_name()))?;
                 copied += 1;
             }
         }
     }
 
-    // Also copy metadata.json so the export is self-describing
-    let meta_src = src_dir.join("metadata.json");
-    if meta_src.exists() {
-        fs::copy(&meta_src, target_dir.join("metadata.json")).map_err(|e| e.to_string())?;
-    }
+    let _ = fs::copy(
+        src_dir.join("metadata.json"),
+        target_dir.join("metadata.json"),
+    );
 
-    // Reveal the export folder in Finder / Explorer
     let _ = app.opener().reveal_item_in_dir(&target_dir);
 
     Ok(ExportResult {

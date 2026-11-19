@@ -32,6 +32,11 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
             Download / Clone
           </button>
+          <button class="nav-item" data-view="account" id="nav-account">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+            My Models
+            <span class="nav-count" id="nav-account-count"></span>
+          </button>
         </div>
         <div class="nav-group" data-od-id="path-0-0-1-0b">
           <div class="nav-label-row">
@@ -49,6 +54,14 @@
         </div>
       </nav>
       <div class="sidebar-foot" data-od-id="path-0-0-2">
+        <div class="account-foot" id="account-foot">
+          <div class="account-avatar" id="account-avatar">?</div>
+          <div class="account-text">
+            <span class="account-name" id="account-name">Not signed in</span>
+            <span class="account-sub" id="account-sub">Printables account</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="account-action">Sign in</button>
+        </div>
         <a class="github-link" href="#" id="github-link" title="View source on GitHub" data-od-id="path-0-0-2-0">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
           GitHub
@@ -145,6 +158,11 @@
                 <h3 data-od-id="path-0-1-1-1-0-1-3-0">Details</h3>
                 <dl class="dl" id="detail-meta" data-od-id="path-0-1-1-1-0-1-3-1"></dl>
               </div>
+              <div class="detail-info" id="detail-history-card">
+                <h3>History</h3>
+                <div class="history-list" id="detail-history"></div>
+                <div class="history-actions" id="detail-history-actions"></div>
+              </div>
             </aside>
           </div>
         </section>
@@ -189,6 +207,26 @@
             <div class="recent-clones">
               <h2 data-od-id="path-0-1-1-2-0-1-0">Recent clones</h2>
               <ul class="recent-list" id="recent-list" data-od-id="path-0-1-1-2-0-1-1"></ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ ACCOUNT / MY MODELS ============ -->
+        <section class="view" id="view-account" data-od-id="view-account">
+          <div class="account-wrap">
+            <div class="account-head">
+              <div>
+                <h1 class="account-title">My Models</h1>
+                <p class="account-desc" id="account-desc">Sign in to Printables to sync the models you authored.</p>
+              </div>
+              <div class="account-actions" id="account-actions"></div>
+            </div>
+            <div class="account-notice hidden" id="account-notice"></div>
+            <div class="sync-jobs hidden" id="sync-jobs"></div>
+            <div class="remote-grid" id="remote-grid"></div>
+            <div class="empty-state hidden" id="account-empty">
+              <h3>Nothing to show yet</h3>
+              <p>Sign in and the app will list every model on your Printables account.</p>
             </div>
           </div>
         </section>
@@ -250,6 +288,40 @@
                   <div class="settings-storage">
                     <span id="settings-storage-nums" data-od-id="path-0-1-1-3-0-2-3-1-0-0-1">0 GB used</span>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card" id="sync-settings-card">
+              <h2>Version control &amp; sync</h2>
+              <p class="settings-desc">Every model folder is its own git repository. Local edits are committed automatically and can be pushed back to printables.com after review.</p>
+              <div class="setting-row">
+                <div><div class="setting-label">Track models with git</div><div class="setting-hint">Creates a .git repository inside each model folder.</div></div>
+                <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-git-enabled" /><span></span></label></div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Commit local edits automatically</div><div class="setting-hint">Detected changes are committed after a short delay.</div></div>
+                <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-auto-commit" /><span></span></label></div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Parallel downloads</div><div class="setting-hint">How many models "Sync all" pulls at once.</div></div>
+                <div class="setting-control"><input type="number" id="pref-concurrency" min="1" max="8" step="1" class="num-input" /></div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Allow pushing to printables.com</div><div class="setting-hint">Off by default. Uploads change your live account and always require a review step.</div></div>
+                <div class="setting-control"><label class="switch"><input type="checkbox" id="pref-remote-write" /><span></span></label></div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Write API</div><div class="setting-hint" id="capability-hint">Not probed yet.</div></div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary btn-sm" id="probe-write-api">Probe write API</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div><div class="setting-label">Existing models</div><div class="setting-hint">Start tracking folders created before 2.0.</div></div>
+                <div class="setting-control">
+                  <button class="btn btn-secondary btn-sm" id="adopt-models">Adopt models</button>
+                  <button class="btn btn-ghost btn-sm" id="open-config">Open config folder</button>
                 </div>
               </div>
             </div>

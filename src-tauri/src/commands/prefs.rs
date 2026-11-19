@@ -1,93 +1,118 @@
+//! Preferences: read, merge, persist.
+//!
+//! 2.0 stores prefs at `~/Library/Application Support/dev.printablesoffline/`
+//! and migrates a 1.x `~/.printablesoffline/prefs.json` on first run.
+
+use crate::config;
+use crate::error::{AppError, AppResult};
+use crate::models::AppPrefs;
 use serde::Deserialize;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
-use crate::models::AppPrefs;
 
-/// Get the prefs file path: ~/.printablesoffline/prefs.json
-fn prefs_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "Cannot determine home directory")?;
-    let dir = PathBuf::from(home).join(".printablesoffline");
-    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create config directory: {e}"))?;
-    Ok(dir.join("prefs.json"))
-}
-
-fn load_prefs() -> Result<AppPrefs, String> {
-    let path = prefs_path()?;
-    if !path.exists() {
-        return Ok(AppPrefs::default());
-    }
-    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| e.to_string())
-}
-
-fn save_prefs(prefs: &AppPrefs) -> Result<(), String> {
-    let path = prefs_path()?;
-    eprintln!("[prefs] Saving to: {}", path.display());
-    let raw = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
-    fs::write(&path, &raw).map_err(|e| {
-        eprintln!("[prefs] Write failed: {}", e);
-        e.to_string()
-    })?;
-    eprintln!("[prefs] Saved successfully");
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
+/// Field names stay snake_case: that is what the existing UI already sends.
+#[derive(Debug, Deserialize, Default)]
 pub struct SetPrefsArgs {
     pub theme: Option<String>,
     pub slicer_key: Option<String>,
     pub slicer_executable: Option<String>,
     pub library_folder: Option<String>,
+    pub git_enabled: Option<bool>,
+    pub auto_commit_local_edits: Option<bool>,
+    pub sync_concurrency: Option<usize>,
+    pub auto_sync_on_launch: Option<bool>,
+    pub remote_write_enabled: Option<bool>,
 }
 
-/// Get current preferences.
 #[tauri::command]
-pub fn get_prefs(_app: AppHandle) -> Result<AppPrefs, String> {
-    load_prefs()
+pub fn get_prefs(_app: AppHandle) -> AppResult<AppPrefs> {
+    let _ = config::migrate_legacy_prefs();
+    config::load_prefs()
 }
 
-/// Update one or more preference fields. Returns the merged result.
 #[tauri::command]
 pub fn set_prefs(
     app: AppHandle,
     args: SetPrefsArgs,
     prefs_state: State<'_, Mutex<AppPrefs>>,
-) -> Result<AppPrefs, String> {
-    eprintln!("[prefs] set_prefs called with args: {:?}", args);
-    let mut prefs = load_prefs()?;
+) -> AppResult<AppPrefs> {
+    let mut prefs = config::load_prefs()?;
 
-    if let Some(t) = args.theme { prefs.theme = t; }
-    if let Some(s) = args.slicer_key { prefs.slicer_key = s; }
-    if let Some(e) = args.slicer_executable { prefs.slicer_executable = Some(e); }
-    if let Some(l) = args.library_folder {
-        eprintln!("[prefs] Setting library_folder to: {}", l);
-        let selected = std::path::PathBuf::from(&l);
-        // If the selected folder already ends with "Printables Offline Library", use it as-is.
-        // Otherwise, create/use a "Printables Offline Library" subdirectory inside it.
-        let lib_path = if selected.file_name().map(|n| n.to_string_lossy()) == Some("Printables Offline Library".into()) {
-            selected
-        } else {
-            let sub = selected.join("Printables Offline Library");
-            let _ = std::fs::create_dir_all(&sub);
-            sub
-        };
-        prefs.library_folder = Some(lib_path.display().to_string());
-        eprintln!("[prefs] Final library_folder: {:?}", prefs.library_folder);
-        // Extend runtime asset scope so images in the new folder are servable
-        if let Ok(path) = lib_path.canonicalize() {
-            let _ = app.asset_protocol_scope().allow_directory(&path, true);
-        }
+    if let Some(theme) = args.theme {
+        prefs.theme = theme;
+    }
+    if let Some(key) = args.slicer_key {
+        prefs.slicer_key = key;
+    }
+    if let Some(exe) = args.slicer_executable {
+        prefs.slicer_executable = Some(exe);
+    }
+    if let Some(flag) = args.git_enabled {
+        prefs.git_enabled = flag;
+    }
+    if let Some(flag) = args.auto_commit_local_edits {
+        prefs.auto_commit_local_edits = flag;
+    }
+    if let Some(n) = args.sync_concurrency {
+        prefs.sync_concurrency = n.clamp(1, 8);
+    }
+    if let Some(flag) = args.auto_sync_on_launch {
+        prefs.auto_sync_on_launch = flag;
+    }
+    if let Some(flag) = args.remote_write_enabled {
+        prefs.remote_write_enabled = flag;
     }
 
-    save_prefs(&prefs)?;
+    if let Some(selected) = args.library_folder {
+        let lib_path = normalize_library_folder(&selected)?;
+        prefs.library_folder = Some(lib_path.display().to_string());
+        widen_asset_scope(&app, &lib_path);
+    }
 
-    // Update managed state so other commands see the new prefs immediately
-    let mut managed = prefs_state.lock().map_err(|e| e.to_string())?;
+    config::save_prefs(&prefs)?;
+
+    let mut managed = prefs_state
+        .lock()
+        .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
     *managed = prefs.clone();
 
     Ok(prefs)
+}
+
+/// Chosen folder becomes `<folder>/Printables Offline Library` unless it is
+/// already named that. Kept from 1.x so existing libraries keep working.
+fn normalize_library_folder(selected: &str) -> AppResult<PathBuf> {
+    let path = PathBuf::from(selected);
+    let is_library = path
+        .file_name()
+        .map(|n| n.to_string_lossy() == "Printables Offline Library")
+        .unwrap_or(false);
+
+    let lib = if is_library {
+        path
+    } else {
+        path.join("Printables Offline Library")
+    };
+
+    std::fs::create_dir_all(&lib)
+        .map_err(|e| AppError::io(format!("Cannot create {}: {e}", lib.display())))?;
+    Ok(lib)
+}
+
+fn widen_asset_scope(app: &AppHandle, path: &std::path::Path) {
+    if let Ok(canonical) = path.canonicalize() {
+        let _ = app.asset_protocol_scope().allow_directory(&canonical, true);
+    }
+}
+
+/// Reveal the preferences file in Finder (Settings → Advanced).
+#[tauri::command]
+pub fn open_config_folder(app: AppHandle) -> AppResult<String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = config::config_dir()?;
+    app.opener()
+        .reveal_item_in_dir(&dir)
+        .map_err(|e| AppError::io(format!("Cannot open config folder: {e}")))?;
+    Ok(dir.display().to_string())
 }

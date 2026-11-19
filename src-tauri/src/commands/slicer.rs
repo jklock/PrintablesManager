@@ -1,14 +1,17 @@
+use crate::models::AppPrefs;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::State;
-use crate::models::AppPrefs;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenInSlicerArgs {
+    // Accepted for API symmetry with the UI; launching only needs `files`.
+    #[allow(dead_code)]
     pub model_id: String,
+    #[allow(dead_code)]
     pub slicer: String,
     pub files: Vec<String>,
 }
@@ -45,51 +48,52 @@ pub fn open_in_slicer(
         .as_ref()
         .ok_or("Slicer executable not configured. Set it in Preferences.")?;
 
-    // On macOS, prefer `open -a <app>` to bypass sandbox
-    if cfg!(target_os = "macos") {
-        if let Some(app_path) = resolve_app_bundle(exe) {
-            let mut cmd = Command::new("open");
-            cmd.arg("-a").arg(&app_path);
-            for f in &args.files {
-                cmd.arg(f);
-            }
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            cmd.spawn().map_err(|e| format!("Failed to launch slicer: {e}"))?;
-            return Ok(());
+    // Prefer `open -a <app>` so an .app bundle launches the normal way.
+    if let Some(app_path) = resolve_app_bundle(exe) {
+        let mut cmd = Command::new("open");
+        cmd.arg("-a").arg(&app_path);
+        for f in &args.files {
+            cmd.arg(f);
         }
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.spawn()
+            .map_err(|e| format!("Failed to launch slicer: {e}"))?;
+        return Ok(());
     }
 
     let mut cmd = Command::new(exe);
-    cmd.args(&args.files).stdout(Stdio::null()).stderr(Stdio::null());
-    cmd.spawn().map_err(|e| format!("Failed to launch slicer: {e}"))?;
+    cmd.args(&args.files)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch slicer: {e}"))?;
     Ok(())
 }
 
 /// Launch the slicer with a single file (quick-slice from card).
 #[tauri::command]
-pub fn slice_file(
-    args: SliceFileArgs,
-    prefs: State<'_, Mutex<AppPrefs>>,
-) -> Result<(), String> {
+pub fn slice_file(args: SliceFileArgs, prefs: State<'_, Mutex<AppPrefs>>) -> Result<(), String> {
     let prefs = prefs.lock().map_err(|e| e.to_string())?;
     let exe = prefs
         .slicer_executable
         .as_ref()
         .ok_or("Slicer executable not configured.")?;
 
-    // On macOS, prefer `open -a <app>` to bypass sandbox
-    if cfg!(target_os = "macos") {
-        if let Some(app_path) = resolve_app_bundle(exe) {
-            let mut cmd = Command::new("open");
-            cmd.arg("-a").arg(&app_path).arg(&args.file);
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            cmd.spawn().map_err(|e| format!("Failed to launch slicer: {e}"))?;
-            return Ok(());
-        }
+    // Prefer `open -a <app>` so an .app bundle launches the normal way.
+    if let Some(app_path) = resolve_app_bundle(exe) {
+        let mut cmd = Command::new("open");
+        cmd.arg("-a").arg(&app_path).arg(&args.file);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.spawn()
+            .map_err(|e| format!("Failed to launch slicer: {e}"))?;
+        return Ok(());
     }
 
     let mut cmd = Command::new(exe);
-    cmd.arg(&args.file).stdout(Stdio::null()).stderr(Stdio::null());
-    cmd.spawn().map_err(|e| format!("Failed to launch slicer: {e}"))?;
+    cmd.arg(&args.file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch slicer: {e}"))?;
     Ok(())
 }

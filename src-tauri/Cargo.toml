@@ -1,7 +1,12 @@
 [package]
 name = "printables-offline"
-version = "1.2.0"
+version = "2.0.0"
+description = "Offline-first manager for your own Printables.com models"
 edition = "2021"
+
+[lib]
+name = "printables_offline"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -16,6 +21,14 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# Local version control: embedded libgit2, no system git and no network/TLS needed.
+git2 = { version = "0.19", default-features = false }
+# Filesystem watching for automatic local-edit commits.
+notify = "6"
+# Credential storage in the macOS Keychain (falls back to a 0600 file).
+keyring = { version = "3", features = ["apple-native"] }
+sha2 = "0.10"
+base64 = "0.22"
 
 [features]
 default = ["custom-protocol"]

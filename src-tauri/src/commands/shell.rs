@@ -11,7 +11,7 @@ pub struct OpenExternalArgs {
     pub url: String,
 }
 
-/// Reveal a local path in Finder / Explorer / file manager.
+/// Reveal a local path in Finder.
 #[tauri::command]
 pub fn open_folder(app: tauri::AppHandle, args: OpenFolderArgs) -> Result<(), String> {
     let expanded = if let Some(rest) = args.path.strip_prefix("~/") {
@@ -41,7 +41,5 @@ pub fn open_external(app: tauri::AppHandle, args: OpenExternalArgs) -> Result<()
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }

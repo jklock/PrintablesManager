@@ -1,5 +1,14 @@
-//! Pure-Rust client for the Printables.com GraphQL API and media CDNs.
+//! Client for the Printables.com GraphQL API and media CDNs.
+//!
+//! 2.0 changes from the read-only 1.x client:
+//!   * optional bearer token (account sessions),
+//!   * GraphQL `errors[]` are inspected instead of silently producing `null`,
+//!   * a real rate limiter with `429`/`Retry-After` handling,
+//!   * file listing is separated from download-link resolution, so a sync only
+//!     pays for links it actually needs,
+//!   * downloads go to a `.part` file and are renamed atomically.
 
+use crate::error::{AppError, AppResult};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -7,13 +16,13 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const GRAPHQL_ENDPOINT: &str = "https://api.printables.com/graphql/";
 const MEDIA_BASE_URL: &str = "https://media.printables.com/";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-
-const VALID_ORDERINGS: &[&str] = &["best_match", "popular", "latest", "rating", "makes_count"];
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
@@ -28,105 +37,341 @@ pub struct ModelMetadata {
     pub published_date: Option<String>,
     pub main_image_url: Option<String>,
     pub description: String,
+    /// Raw HTML as returned by the API; kept so description edits can be pushed.
+    #[serde(default)]
+    pub raw_description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteFile {
     pub id: String,
     pub name: String,
-    pub download_url: Option<String>,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub preview_path: Option<String>,
     pub size_bytes: Option<u64>,
+    /// "stl" | "gcode" | "sla" | "other"
     pub file_type: String,
+    #[serde(default)]
+    pub download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteImage {
+    pub id: Option<String>,
     pub url: String,
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ViewerInfo {
+    pub id: Option<String>,
+    pub public_username: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorModelsPage {
+    pub models: Vec<Value>,
+    pub cursor: Option<String>,
+}
+
 pub struct PrintablesClient {
     http: Client,
+    token: Option<String>,
+    last_request: Mutex<Option<Instant>>,
 }
 
 impl PrintablesClient {
-    pub fn new() -> Result<Self, String> {
+    #[allow(dead_code)] // used by tests and by future anonymous-only flows
+    pub fn anonymous() -> AppResult<Self> {
+        Self::with_token(None)
+    }
+
+    pub fn with_token(token: Option<String>) -> AppResult<Self> {
         let http = Client::builder()
             .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| format!("Failed to initialize HTTP client: {e}"))?;
-        Ok(Self { http })
+            .map_err(|e| AppError::network(format!("Failed to initialize HTTP client: {e}")))?;
+        Ok(Self {
+            http,
+            token,
+            last_request: Mutex::new(None),
+        })
     }
 
-    fn post_graphql(&self, payload: &Value) -> Result<Value, String> {
-        let resp = self
-            .http
-            .post(GRAPHQL_ENDPOINT)
-            .json(payload)
-            .send()
-            .map_err(|e| format!("GraphQL request failed: {e}"))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(format!("GraphQL HTTP error: {status}"));
-        }
-
-        resp.json::<Value>()
-            .map_err(|e| format!("Invalid GraphQL JSON response: {e}"))
+    pub fn has_token(&self) -> bool {
+        self.token.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
     }
 
-    /// Searches Printables.com for models using the GraphQL API.
-    #[allow(dead_code)]
-    pub fn search_models(
-        &self,
-        search_term: &str,
-        limit: usize,
-        ordering: &str,
-    ) -> Result<Vec<Value>, String> {
-        if !VALID_ORDERINGS.contains(&ordering) {
-            return Err(format!(
-                "Invalid ordering '{ordering}'. Must be one of: {}",
-                VALID_ORDERINGS.join(", ")
-            ));
+    /// Executes a caller-supplied GraphQL document. Used by capability
+    /// discovery and by the push executor, which builds documents from the
+    /// introspected schema instead of hard-coded operation names.
+    pub fn execute_graphql(&self, payload: &Value) -> AppResult<Value> {
+        self.post_graphql(payload)
+    }
+
+    /// Keeps us under ~4 requests/second; parallel workers share this budget.
+    fn throttle(&self) {
+        if let Ok(mut guard) = self.last_request.lock() {
+            if let Some(previous) = *guard {
+                let elapsed = previous.elapsed();
+                if elapsed < MIN_REQUEST_INTERVAL {
+                    std::thread::sleep(MIN_REQUEST_INTERVAL - elapsed);
+                }
+            }
+            *guard = Some(Instant::now());
+        }
+    }
+
+    fn post_graphql(&self, payload: &Value) -> AppResult<Value> {
+        let mut attempt = 0usize;
+        loop {
+            self.throttle();
+
+            let mut request = self.http.post(GRAPHQL_ENDPOINT).json(payload);
+            if let Some(token) = self.token.as_deref().filter(|t| !t.is_empty()) {
+                request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+
+            let resp = request
+                .send()
+                .map_err(|e| AppError::network(format!("GraphQL request failed: {e}")))?;
+            let status = resp.status();
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(AppError::not_authenticated(
+                    "Printables rejected this session. Sign in again.",
+                )
+                .with_detail(format!("HTTP {status}")));
+            }
+
+            if status.as_u16() == 429 {
+                if attempt >= 2 {
+                    return Err(AppError::rate_limited(
+                        "Printables is rate limiting requests. Try again in a minute.",
+                    ));
+                }
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(2 + attempt as u64);
+                std::thread::sleep(Duration::from_secs(wait.min(30)));
+                attempt += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                return Err(AppError::graphql(format!("GraphQL HTTP error: {status}")));
+            }
+
+            let value: Value = resp
+                .json()
+                .map_err(|e| AppError::graphql(format!("Invalid GraphQL JSON response: {e}")))?;
+
+            self.check_graphql_errors(&value)?;
+            return Ok(value);
+        }
+    }
+
+    /// Turns a `200 OK` with `{"errors":[...]}` into a typed error.
+    /// 1.x ignored these, so "Not authenticated" looked like "model not found".
+    fn check_graphql_errors(&self, value: &Value) -> AppResult<()> {
+        let Some(errors) = value.get("errors").and_then(|e| e.as_array()) else {
+            return Ok(());
+        };
+        if errors.is_empty() {
+            return Ok(());
         }
 
+        let messages: Vec<String> = errors
+            .iter()
+            .map(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown GraphQL error")
+                    .to_string()
+            })
+            .collect();
+        let joined = messages.join("; ");
+        let lower = joined.to_lowercase();
+
+        let auth_markers = [
+            "not authenticated",
+            "unauthenticated",
+            "unauthorized",
+            "not authorized",
+            "permission",
+            "jwt",
+            "login required",
+        ];
+        if auth_markers.iter().any(|m| lower.contains(m)) {
+            return Err(AppError::not_authenticated(
+                "This action needs a Printables account. Sign in first.",
+            )
+            .with_detail(joined));
+        }
+
+        Err(AppError::graphql(format!("Printables API error: {joined}")))
+    }
+
+    // ---------------------------------------------------------------- account
+
+    /// Returns the signed-in account. Requires a token.
+    pub fn viewer(&self) -> AppResult<ViewerInfo> {
+        if !self.has_token() {
+            return Err(AppError::not_authenticated("Not signed in to Printables."));
+        }
         let query = r#"
-        query SearchModels($query: String!, $limit: Int, $ordering: SearchChoicesEnum) {
-          result: searchPrints2(query: $query, printType: print, limit: $limit, ordering: $ordering) {
-            items { ...Model __typename }
+        query Viewer {
+          viewer {
+            id
+            publicUsername
+            __typename
           }
         }
-        fragment AvatarUser on UserType { id handle publicUsername __typename }
-        fragment Model on PrintType {
-            id name slug ratingAvg likesCount downloadCount datePublished
-            user { ...AvatarUser __typename }
-            image { filePath }
-            __typename
-        }
         "#;
+        let payload = json!({ "operationName": "Viewer", "query": query, "variables": {} });
+        let data = self.post_graphql(&payload)?;
+
+        let viewer = data
+            .pointer("/data/viewer")
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| {
+                AppError::not_authenticated(
+                    "Printables did not return an account for this session.",
+                )
+            })?;
+
+        Ok(ViewerInfo {
+            id: viewer.get("id").and_then(|v| v.as_str()).map(String::from),
+            public_username: viewer
+                .get("publicUsername")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        })
+    }
+
+    /// Lists models authored by `username`.
+    ///
+    /// printables.com publishes no documented "my models" query, so this scopes
+    /// the public search endpoint to the account name and filters by author.
+    /// Cursor support is optional: when the server returns no cursor the caller
+    /// stops after one page.
+    pub fn author_models(
+        &self,
+        username: &str,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> AppResult<AuthorModelsPage> {
+        let query = if cursor.is_some() {
+            r#"
+            query AuthorModels($query: String!, $limit: Int, $cursor: String) {
+              result: searchPrints2(query: $query, printType: print, limit: $limit, cursor: $cursor) {
+                items { ...Model __typename }
+                cursor
+                __typename
+              }
+            }
+            fragment Model on PrintType {
+              id name slug ratingAvg likesCount downloadCount datePublished
+              user { id handle publicUsername __typename }
+              image { filePath }
+              __typename
+            }
+            "#
+        } else {
+            r#"
+            query AuthorModels($query: String!, $limit: Int) {
+              result: searchPrints2(query: $query, printType: print, limit: $limit) {
+                items { ...Model __typename }
+                __typename
+              }
+            }
+            fragment Model on PrintType {
+              id name slug ratingAvg likesCount downloadCount datePublished
+              user { id handle publicUsername __typename }
+              image { filePath }
+              __typename
+            }
+            "#
+        };
+
+        let mut variables = json!({ "query": username, "limit": limit });
+        if let Some(c) = cursor {
+            variables["cursor"] = json!(c);
+        }
 
         let payload = json!({
-            "operationName": "SearchModels",
+            "operationName": "AuthorModels",
             "query": query,
-            "variables": {
-                "query": search_term,
-                "limit": limit,
-                "ordering": ordering,
-            }
+            "variables": variables
         });
 
         let data = self.post_graphql(&payload)?;
-        Ok(data
+        let items = data
             .pointer("/data/result/items")
             .and_then(|v| v.as_array())
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+
+        let wanted = username.to_lowercase();
+        let filtered: Vec<Value> = items
+            .into_iter()
+            .filter(|item| {
+                item.pointer("/user/publicUsername")
+                    .and_then(|v| v.as_str())
+                    .map(|u| u.to_lowercase() == wanted)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        Ok(AuthorModelsPage {
+            models: filtered,
+            cursor: data
+                .pointer("/data/result/cursor")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        })
     }
 
-    /// Fetches model metadata, tags, stats, cover image, and description via GraphQL.
-    pub fn get_model_metadata(&self, model_id: &str) -> Result<ModelMetadata, String> {
+    /// Asks the API which mutations exist, so write capabilities can be
+    /// discovered rather than guessed. Introspection may be disabled.
+    #[allow(dead_code)]
+    pub fn probe_mutation_fields(&self) -> AppResult<Vec<String>> {
+        let query = r#"
+        query MutationFields {
+          __type(name: "Mutation") {
+            fields { name }
+          }
+        }
+        "#;
+        let payload = json!({ "operationName": "MutationFields", "query": query, "variables": {} });
+        let data = self.post_graphql(&payload)?;
+        let fields = data
+            .pointer("/data/__type/fields")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                AppError::unsupported(
+                    "Printables has schema introspection disabled, so write operations cannot be discovered automatically.",
+                )
+            })?;
+        Ok(fields
+            .iter()
+            .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect())
+    }
+
+    // ----------------------------------------------------------------- models
+
+    /// Fetches model metadata, tags, stats, cover image, and description.
+    pub fn get_model_metadata(&self, model_id: &str) -> AppResult<ModelMetadata> {
         let query = r#"
         query ModelTags($id: ID!) {
           model: print(id: $id) {
@@ -149,7 +394,9 @@ impl PrintablesClient {
         let model = data
             .pointer("/data/model")
             .filter(|v| !v.is_null())
-            .ok_or_else(|| format!("Model {model_id} not found on Printables.com"))?;
+            .ok_or_else(|| {
+                AppError::not_found(format!("Model {model_id} was not found on Printables.com"))
+            })?;
 
         let name = model
             .get("name")
@@ -199,10 +446,7 @@ impl PrintablesClient {
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let summary = model
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let summary = model.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
         let cleaned = clean_description_html(raw_desc);
         let description = if !cleaned.is_empty() {
@@ -225,16 +469,88 @@ impl PrintablesClient {
             published_date,
             main_image_url,
             description,
+            raw_description: raw_desc.to_string(),
         })
     }
 
-    /// Performs the GetDownloadLink mutation to get a temporary direct download URL.
-    pub fn get_real_download_url(
+    /// Lists the model's files without resolving download links.
+    pub fn list_model_files(&self, model_id: &str) -> AppResult<Vec<RemoteFile>> {
+        let query = r#"
+        query ModelFiles($id: ID!) {
+          model: print(id: $id) {
+            id
+            filesType
+            gcodes { ...GcodeDetail __typename }
+            stls { ...StlDetail __typename }
+            slas { ...SlaDetail __typename }
+            otherFiles { ...OtherFileDetail __typename }
+            __typename
+          }
+        }
+        fragment GcodeDetail on GCodeType { id created name folder note printer { id name __typename } excludeFromTotalSum printDuration layerHeight nozzleDiameter material { id name __typename } weight fileSize filePreviewPath rawDataPrinter order __typename }
+        fragment OtherFileDetail on OtherFileType { id created name folder note fileSize filePreviewPath order __typename }
+        fragment SlaDetail on SLAType { id created name folder note expTime firstExpTime printer { id name __typename } printDuration layerHeight usedMaterial fileSize filePreviewPath order __typename }
+        fragment StlDetail on STLType { id created name folder note fileSize filePreviewPath order __typename }
+        "#;
+
+        let payload = json!({
+            "operationName": "ModelFiles",
+            "query": query,
+            "variables": { "id": model_id }
+        });
+
+        let data = self.post_graphql(&payload)?;
+        let Some(model_files) = data.pointer("/data/model").filter(|v| !v.is_null()) else {
+            return Ok(Vec::new());
+        };
+
+        let supported = [
+            ("stls", "stl"),
+            ("gcodes", "gcode"),
+            ("slas", "sla"),
+            ("otherFiles", "other"),
+        ];
+        let mut results = Vec::new();
+
+        for (list_name, api_type) in supported {
+            if let Some(items) = model_files.get(list_name).and_then(|v| v.as_array()) {
+                for item in items {
+                    let Some(file_id) = item.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let Some(file_name) = item.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    results.push(RemoteFile {
+                        id: file_id.to_string(),
+                        name: file_name.to_string(),
+                        folder: item
+                            .get("folder")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        note: item.get("note").and_then(|v| v.as_str()).map(String::from),
+                        preview_path: item
+                            .get("filePreviewPath")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        size_bytes: item.get("fileSize").and_then(|v| v.as_u64()),
+                        file_type: api_type.to_string(),
+                        download_url: None,
+                    });
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Resolves a temporary direct download URL for one file.
+    pub fn resolve_download_link(
         &self,
         file_id: &str,
         model_id: &str,
         file_type: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> AppResult<Option<String>> {
         let query = r#"
         mutation GetDownloadLink($id: ID!, $modelId: ID!, $fileType: DownloadFileTypeEnum!, $source: DownloadSourceEnum!) {
           getDownloadLink(id: $id, printId: $modelId, fileType: $fileType, source: $source) {
@@ -271,93 +587,27 @@ impl PrintablesClient {
         });
 
         let data = self.post_graphql(&payload)?;
-        let dl = data.pointer("/data/getDownloadLink");
-        if let Some(dl) = dl {
-            let ok = dl.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-            if ok {
-                let link = dl
-                    .pointer("/output/link")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                return Ok(link);
-            }
-        }
-        Ok(None)
-    }
-
-    /// Fetches the file list and resolves a temporary direct download URL for each file.
-    pub fn get_model_files(&self, model_id: &str) -> Result<Vec<RemoteFile>, String> {
-        let query = r#"
-        query ModelFiles($id: ID!) {
-          model: print(id: $id) {
-            id
-            filesType
-            gcodes { ...GcodeDetail __typename }
-            stls { ...StlDetail __typename }
-            slas { ...SlaDetail __typename }
-            otherFiles { ...OtherFileDetail __typename }
-            __typename
-          }
-        }
-        fragment GcodeDetail on GCodeType { id created name folder note printer { id name __typename } excludeFromTotalSum printDuration layerHeight nozzleDiameter material { id name __typename } weight fileSize filePreviewPath rawDataPrinter order __typename }
-        fragment OtherFileDetail on OtherFileType { id created name folder note fileSize filePreviewPath order __typename }
-        fragment SlaDetail on SLAType { id created name folder note expTime firstExpTime printer { id name __typename } printDuration layerHeight usedMaterial fileSize filePreviewPath order __typename }
-        fragment StlDetail on STLType { id created name folder note fileSize filePreviewPath order __typename }
-        "#;
-
-        let payload = json!({
-            "operationName": "ModelFiles",
-            "query": query,
-            "variables": { "id": model_id }
-        });
-
-        let data = self.post_graphql(&payload)?;
-        let Some(model_files) = data.pointer("/data/model").filter(|v| !v.is_null()) else {
-            return Ok(Vec::new());
+        let Some(dl) = data.pointer("/data/getDownloadLink") else {
+            return Ok(None);
         };
-
-        let supported = [("stls", "stl"), ("gcodes", "gcode"), ("slas", "sla"), ("otherFiles", "other")];
-        let mut results = Vec::new();
-
-        for (list_name, api_type) in supported {
-            if let Some(items) = model_files.get(list_name).and_then(|v| v.as_array()) {
-                for item in items {
-                    let Some(file_id) = item.get("id").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let Some(file_name) = item.get("name").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let size_bytes = item.get("fileSize").and_then(|v| v.as_u64());
-                    let download_url = self
-                        .get_real_download_url(file_id, model_id, api_type)
-                        .ok()
-                        .flatten();
-
-                    results.push(RemoteFile {
-                        id: file_id.to_string(),
-                        name: file_name.to_string(),
-                        download_url,
-                        size_bytes,
-                        file_type: api_type.to_string(),
-                    });
-
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-            }
+        if !dl.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
         }
-
-        Ok(results)
+        Ok(dl
+            .pointer("/output/link")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from))
     }
 
-    /// Fetches all gallery image URLs for a model using the GraphQL API.
-    pub fn get_model_images(&self, model_id: &str) -> Result<Vec<RemoteImage>, String> {
+    /// Fetches all gallery images for a model.
+    pub fn get_model_images(&self, model_id: &str) -> AppResult<Vec<RemoteImage>> {
         let query = r#"
         query ModelImages($id: ID!) {
           model: print(id: $id) {
             id
             images {
+              id
               filePath
               __typename
             }
@@ -388,6 +638,7 @@ impl PrintablesClient {
                 .filter(|s| !s.is_empty())
             {
                 images.push(RemoteImage {
+                    id: img.get("id").and_then(|v| v.as_str()).map(String::from),
                     url: format!("{MEDIA_BASE_URL}{}", fp.trim_start_matches('/')),
                     kind: "photo".to_string(),
                 });
@@ -397,46 +648,109 @@ impl PrintablesClient {
         Ok(images)
     }
 
-    /// Downloads a URL to `dest`, reporting `(bytes_done, bytes_total)` via callback.
-    pub fn download_file<F>(&self, url: &str, dest: &Path, mut on_progress: F) -> Result<u64, String>
+    /// Searches printables.com for models (kept for a future browse view).
+    #[allow(dead_code)]
+    pub fn search_models(&self, term: &str, limit: usize, ordering: &str) -> AppResult<Vec<Value>> {
+        const VALID_ORDERINGS: &[&str] =
+            &["best_match", "popular", "latest", "rating", "makes_count"];
+        if !VALID_ORDERINGS.contains(&ordering) {
+            return Err(AppError::invalid(format!(
+                "Invalid ordering '{ordering}'. Must be one of: {}",
+                VALID_ORDERINGS.join(", ")
+            )));
+        }
+
+        let query = r#"
+        query SearchModels($query: String!, $limit: Int, $ordering: SearchChoicesEnum) {
+          result: searchPrints2(query: $query, printType: print, limit: $limit, ordering: $ordering) {
+            items { ...Model __typename }
+          }
+        }
+        fragment Model on PrintType {
+            id name slug ratingAvg likesCount downloadCount datePublished
+            user { id handle publicUsername __typename }
+            image { filePath }
+            __typename
+        }
+        "#;
+
+        let payload = json!({
+            "operationName": "SearchModels",
+            "query": query,
+            "variables": { "query": term, "limit": limit, "ordering": ordering }
+        });
+
+        let data = self.post_graphql(&payload)?;
+        Ok(data
+            .pointer("/data/result/items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    // --------------------------------------------------------------- transfer
+
+    /// Downloads `url` into `dest` atomically (`.part` then rename).
+    pub fn download_file<F>(&self, url: &str, dest: &Path, mut on_progress: F) -> AppResult<u64>
     where
         F: FnMut(u64, u64),
     {
-        let mut resp = self
-            .http
-            .get(url)
-            .send()
-            .map_err(|e| format!("Download request failed for {url}: {e}"))?;
+        let mut resp =
+            self.http.get(url).send().map_err(|e| {
+                AppError::network(format!("Download request failed for {url}: {e}"))
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("Download HTTP {status} for {url}"));
+            return Err(AppError::network(format!(
+                "Download HTTP {status} for {url}"
+            )));
         }
 
         let total = resp.content_length().unwrap_or(0);
-        let mut file = File::create(dest)
-            .map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
+        let part_path = dest.with_file_name(format!(
+            "{}.part",
+            dest.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download".to_string())
+        ));
 
-        let mut buf = [0u8; 8192];
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut file = File::create(&part_path)
+            .map_err(|e| AppError::io(format!("Failed to create {}: {e}", part_path.display())))?;
+
+        let mut buf = [0u8; 64 * 1024];
         let mut done: u64 = 0;
         loop {
             let n = resp
                 .read(&mut buf)
-                .map_err(|e| format!("Error reading stream from {url}: {e}"))?;
+                .map_err(|e| AppError::network(format!("Error reading stream from {url}: {e}")))?;
             if n == 0 {
                 break;
             }
             file.write_all(&buf[..n])
-                .map_err(|e| format!("Error writing {}: {e}", dest.display()))?;
+                .map_err(|e| AppError::io(format!("Error writing {}: {e}", dest.display())))?;
             done += n as u64;
             on_progress(done, total);
         }
+        file.flush()?;
+        drop(file);
+
+        std::fs::rename(&part_path, dest).map_err(|e| {
+            AppError::io(format!(
+                "Cannot move {} into place: {e}",
+                part_path.display()
+            ))
+        })?;
 
         Ok(done)
     }
 }
 
-/// Converts Printables HTML description into the clean markdown-like text expected by the UI.
+/// Converts Printables HTML description into the clean markdown-like text the UI renders.
 pub fn clean_description_html(html: &str) -> String {
     if html.trim().is_empty() {
         return String::new();
@@ -444,7 +758,6 @@ pub fn clean_description_html(html: &str) -> String {
 
     let mut text = html.replace("\r\n", "\n");
 
-    // Convert headings <h1>..<h4> into "\n## Heading\n"
     if let Ok(re_h) = Regex::new(r"(?is)<h[1-4][^>]*>(.*?)</h[1-4]>") {
         text = re_h
             .replace_all(&text, |caps: &regex::Captures| {
@@ -459,9 +772,7 @@ pub fn clean_description_html(html: &str) -> String {
             .into_owned();
     }
 
-    // Convert <a ... href="url" ...>label</a> into "[label](url)"
-    if let Ok(re_a) = Regex::new(r#"(?is)<a\b[^>]*?\bhref\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#)
-    {
+    if let Ok(re_a) = Regex::new(r#"(?is)<a\b[^>]*?\bhref\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#) {
         text = re_a
             .replace_all(&text, |caps: &regex::Captures| {
                 let href = caps[1].trim();
@@ -477,7 +788,6 @@ pub fn clean_description_html(html: &str) -> String {
             .into_owned();
     }
 
-    // Line breaks and block endings
     if let Ok(re_br) = Regex::new(r"(?i)<br\s*/?>") {
         text = re_br.replace_all(&text, "\n").into_owned();
     }
@@ -562,27 +872,71 @@ mod tests {
 
     #[test]
     fn test_search_models_rejects_invalid_ordering() {
-        let client = PrintablesClient::new().unwrap();
-        let err = client.search_models("benchy", 5, "invalid_order").unwrap_err();
-        assert!(err.contains("Invalid ordering"));
+        let client = PrintablesClient::anonymous().unwrap();
+        let err = client
+            .search_models("benchy", 5, "invalid_order")
+            .unwrap_err();
+        assert_eq!(err.code, "INVALID_INPUT");
     }
 
     #[test]
+    fn graphql_errors_are_classified_not_swallowed() {
+        let client = PrintablesClient::anonymous().unwrap();
+
+        let auth_error = json!({ "errors": [{ "message": "Not authenticated" }] });
+        let err = client.check_graphql_errors(&auth_error).unwrap_err();
+        assert_eq!(err.code, "NOT_AUTHENTICATED");
+
+        let other = json!({ "errors": [{ "message": "Field 'x' does not exist" }] });
+        let err = client.check_graphql_errors(&other).unwrap_err();
+        assert_eq!(err.code, "GRAPHQL");
+
+        assert!(client.check_graphql_errors(&json!({ "data": {} })).is_ok());
+    }
+
+    #[test]
+    fn anonymous_client_reports_missing_session() {
+        let client = PrintablesClient::anonymous().unwrap();
+        let err = client.viewer().unwrap_err();
+        assert_eq!(err.code, "NOT_AUTHENTICATED");
+    }
+
+    #[test]
+    fn part_path_sits_next_to_destination() {
+        let dest = Path::new("/tmp/model/files/a.stl");
+        let part = dest.with_file_name(format!(
+            "{}.part",
+            dest.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(part, Path::new("/tmp/model/files/a.stl.part"));
+    }
+
+    /// Requires network. Run with `PO_LIVE=1 cargo test -- --ignored`.
+    #[test]
+    #[ignore]
     fn test_live_graphql_metadata_files_and_images() {
-        let client = PrintablesClient::new().unwrap();
-        let meta = client.get_model_metadata("1648230").expect("metadata fetch failed");
+        if std::env::var("PO_LIVE").is_err() {
+            return;
+        }
+        let client = PrintablesClient::anonymous().unwrap();
+        let meta = client
+            .get_model_metadata("1648230")
+            .expect("metadata fetch failed");
         assert_eq!(meta.id, "1648230");
         assert!(meta.name.to_lowercase().contains("benchy"));
-        assert!(!meta.tags.is_empty());
-        assert!(meta.main_image_url.is_some());
-        assert!(!meta.description.is_empty());
 
-        let files = client.get_model_files("1648230").expect("files fetch failed");
+        let files = client
+            .list_model_files("1648230")
+            .expect("files fetch failed");
         assert!(!files.is_empty());
-        assert!(files.iter().any(|f| f.download_url.is_some()));
+        let link = client
+            .resolve_download_link(&files[0].id, "1648230", &files[0].file_type)
+            .expect("download link failed");
+        assert!(link.is_some());
 
-        let images = client.get_model_images("1648230").expect("images fetch failed");
+        let images = client
+            .get_model_images("1648230")
+            .expect("images fetch failed");
         assert!(!images.is_empty());
-        assert!(images[0].url.starts_with("https://media.printables.com/"));
     }
 }

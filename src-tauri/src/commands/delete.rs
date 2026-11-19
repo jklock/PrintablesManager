@@ -1,72 +1,63 @@
+//! `delete_model`: remove a model folder and forget its bookkeeping.
+
+use crate::config;
+use crate::error::{AppError, AppResult};
+use crate::library::locator;
+use crate::models::{AppPrefs, CollectionsFile};
 use serde::Deserialize;
 use std::fs;
 use std::sync::Mutex;
 use tauri::State;
-use crate::models::AppPrefs;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeleteModelArgs {
+pub struct DeleteArgs {
     pub model_id: String,
 }
 
-/// Delete a model's directory from the library.
 #[tauri::command]
-pub fn delete_model(
-    args: DeleteModelArgs,
-    prefs: State<'_, Mutex<AppPrefs>>,
-) -> Result<(), String> {
-    let prefs = prefs.lock().map_err(|e| e.to_string())?;
-    let lib = prefs
-        .library_folder
-        .as_ref()
-        .ok_or("Library folder not configured. Set it in Preferences first.")?;
-    let lib_path = std::path::Path::new(lib);
+pub fn delete_model(args: DeleteArgs, prefs: State<'_, Mutex<AppPrefs>>) -> AppResult<()> {
+    let snapshot = {
+        let prefs = prefs
+            .lock()
+            .map_err(|_| AppError::internal("Preferences lock poisoned"))?;
+        prefs.clone()
+    };
+    let library = config::library_dir(&snapshot)?;
 
-    // Find the model directory by matching model_id in metadata.json
-    let mut model_dir = None;
-    for entry in fs::read_dir(lib_path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let meta_path = entry.path().join("metadata.json");
-        if !meta_path.exists() {
-            continue;
-        }
-        let Ok(raw) = fs::read_to_string(&meta_path) else {
-            continue;
-        };
-        let Ok(meta) = serde_json::from_str::<crate::models::MetadataV1>(&raw) else {
-            continue;
-        };
-        if meta.model_id == args.model_id {
-            model_dir = Some(entry.path());
-            break;
-        }
-    }
+    let dir = locator::find_model_dir(&library, &args.model_id)?;
+    fs::remove_dir_all(&dir)
+        .map_err(|e| AppError::io(format!("Failed to delete {}: {e}", dir.display())))?;
 
-    let dir = model_dir.ok_or(format!("Model not found in library: {}", args.model_id))?;
+    // Drop the sync bookkeeping too, otherwise a later sync would think this
+    // model is still known.
+    let _ = fs::remove_file(config::model_state_path(&library, &args.model_id));
 
-    // Delete the entire model directory
-    fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete model directory: {e}"))?;
-
-    // Best-effort: drop this model from any collections it belonged to.
-    let collections_path = lib_path.join("collections.json");
-    if let Ok(raw) = fs::read_to_string(&collections_path) {
-        if let Ok(mut data) = serde_json::from_str::<crate::models::CollectionsFile>(&raw) {
-            let mut changed = false;
-            for c in data.collections.iter_mut() {
-                let before = c.model_ids.len();
-                c.model_ids.retain(|id| id != &args.model_id);
-                if c.model_ids.len() != before {
-                    changed = true;
-                }
-            }
-            if changed {
-                if let Ok(serialized) = serde_json::to_string_pretty(&data) {
-                    let _ = fs::write(&collections_path, serialized);
-                }
-            }
-        }
-    }
-
+    prune_collections(&library, &args.model_id);
     Ok(())
+}
+
+fn prune_collections(library: &std::path::Path, model_id: &str) {
+    let path = library.join("collections.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut data) = serde_json::from_str::<CollectionsFile>(&raw) else {
+        return;
+    };
+
+    let mut changed = false;
+    for collection in data.collections.iter_mut() {
+        let before = collection.model_ids.len();
+        collection.model_ids.retain(|id| id != model_id);
+        if collection.model_ids.len() != before {
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Ok(serialized) = serde_json::to_string_pretty(&data) {
+            let _ = fs::write(&path, serialized);
+        }
+    }
 }

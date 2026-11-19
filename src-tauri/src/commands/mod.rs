@@ -1,10 +1,14 @@
+pub mod auth;
 pub mod clone;
 pub mod collections;
 pub mod delete;
 pub mod dialogs;
 pub mod export;
+pub mod git;
 pub mod library;
 pub mod maintenance;
 pub mod prefs;
+pub mod push;
 pub mod shell;
 pub mod slicer;
+pub mod sync;

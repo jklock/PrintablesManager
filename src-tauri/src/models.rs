@@ -7,26 +7,39 @@ pub struct ModelSummary {
     pub name: String,
     pub creator: String,
     pub tags: Vec<String>,
-    pub added: String,          // ISO date string
-    pub source: String,         // original printables.com URL
-    pub description: String,    // model description (may contain error text if fetch failed)
+    pub added: String,       // ISO date string
+    pub source: String,      // original printables.com URL
+    pub description: String, // model description (may contain error text if fetch failed)
     pub files: Vec<FileEntry>,
-    pub kinds: Vec<String>,     // deduplicated file extensions
+    pub kinds: Vec<String>, // deduplicated file extensions
     pub size_mb: f64,
     pub cover_asset_url: Option<String>, // asset://localhost/… path or None
-    pub images: Vec<ImageAsset>, // all downloaded images with asset URLs
+    pub images: Vec<ImageAsset>,         // all downloaded images with asset URLs
+    /// Absolute path of this model's directory. The UI must never re-derive
+    /// this from `source` — the on-disk slug can differ from the URL slug.
+    #[serde(default)]
+    pub dir: String,
+    /// True when this folder is a git repository.
+    #[serde(default)]
+    pub has_git: bool,
+    /// True when the working tree differs from HEAD (uncommitted local edits).
+    #[serde(default)]
+    pub dirty: bool,
+    /// "clean" | "dirty" | "no-git" — convenience for the UI badge.
+    #[serde(default)]
+    pub sync_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageAsset {
-    pub url: String,            // asset://localhost/… path
-    pub kind: String,           // "cover" | "photo" | "render" | etc.
-    pub name: String,           // filename
+    pub url: String,  // asset://localhost/… path
+    pub kind: String, // "cover" | "photo" | "render" | etc.
+    pub name: String, // filename
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
-    pub n: String,   // filename (matches prototype convention)
+    pub n: String, // filename (matches prototype convention)
     pub mb: f64,
     pub modified: String,
 }
@@ -58,8 +71,14 @@ where
     let opt: Option<serde_json::Value> = Option::deserialize(deserializer)?;
     match opt {
         None => Ok(None),
-        Some(serde_json::Value::Number(n)) => n.as_f64().map(Some).ok_or_else(|| Error::custom("expected number")),
-        Some(serde_json::Value::String(s)) => s.parse::<f64>().map(Some).map_err(|e| Error::custom(e.to_string())),
+        Some(serde_json::Value::Number(n)) => n
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| Error::custom("expected number")),
+        Some(serde_json::Value::String(s)) => s
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|e| Error::custom(e.to_string())),
         _ => Err(Error::custom("expected string or number")),
     }
 }
@@ -79,13 +98,19 @@ pub struct MetadataFile {
     pub kind: String,
     pub size_bytes: u64,
     pub local_path: String, // relative to model dir: "files/x.3mf"
+    /// Remote file id on printables.com. `None` means "local-only, upload it".
+    /// Deleting this value is the supported way to re-upload a file as new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataImage {
     pub name: String,
-    pub kind: String,
+    pub kind: String,       // "cover" | "photo"
     pub local_path: String, // relative to model dir: "images/cover.jpg"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
 }
 
 /// Aggregated library index returned by `list_models`.
@@ -130,17 +155,50 @@ fn default_collections_schema_version() -> u32 {
 
 impl Default for CollectionsFile {
     fn default() -> Self {
-        Self { schema_version: 1, collections: Vec::new() }
+        Self {
+            schema_version: 1,
+            collections: Vec::new(),
+        }
     }
 }
 
-/// Prefs stored via tauri-plugin-store (replaces localStorage keys).
+/// Preferences, stored as JSON at
+/// `~/Library/Application Support/dev.printablesoffline/prefs.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPrefs {
-    pub theme: String,              // "light" | "dark" | "system"
-    pub slicer_key: String,         // "prusa" | "orca"
+    pub theme: String,      // "light" | "dark" | "system"
+    pub slicer_key: String, // "prusa" | "orca" | "bambu" | "cura"
     pub slicer_executable: Option<String>,
     pub library_folder: Option<String>,
+
+    // ---- 2.0 fields (all defaulted so 1.x prefs keep loading) ----
+    /// Create and maintain a git repository inside every model folder.
+    #[serde(default = "default_true")]
+    pub git_enabled: bool,
+    /// Commit local edits automatically when the folder changes.
+    #[serde(default = "default_true")]
+    pub auto_commit_local_edits: bool,
+    /// Number of models downloaded in parallel by "Sync all".
+    #[serde(default = "default_sync_concurrency")]
+    pub sync_concurrency: usize,
+    /// Pull the account library automatically on launch (only when signed in).
+    #[serde(default)]
+    pub auto_sync_on_launch: bool,
+    /// Master switch for writing to printables.com. Off by default: uploads
+    /// mutate the user's real account and the write API is not documented.
+    #[serde(default)]
+    pub remote_write_enabled: bool,
+    /// Last successful full sync (ISO-8601), for the UI.
+    #[serde(default)]
+    pub last_sync_at: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sync_concurrency() -> usize {
+    3
 }
 
 impl Default for AppPrefs {
@@ -150,6 +208,12 @@ impl Default for AppPrefs {
             slicer_key: "prusa".into(),
             slicer_executable: None,
             library_folder: None,
+            git_enabled: true,
+            auto_commit_local_edits: true,
+            sync_concurrency: 3,
+            auto_sync_on_launch: false,
+            remote_write_enabled: false,
+            last_sync_at: None,
         }
     }
 }

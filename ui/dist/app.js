@@ -39,8 +39,18 @@ let state = {
   collections: [],
   activeCollectionId: null,
   totals: { models: 0, files: 0, bytes_used: 0, bytes_capacity: DISK_GB * 1024 * 1024 * 1024 },
-  prefs: { theme: 'system', slicer_key: 'prusa', slicer_executable: null, library_folder: null },
-  libraryConfigured: false
+  prefs: {
+    theme: 'system', slicer_key: 'prusa', slicer_executable: null, library_folder: null,
+    git_enabled: true, auto_commit_local_edits: true, sync_concurrency: 3,
+    auto_sync_on_launch: false, remote_write_enabled: false
+  },
+  libraryConfigured: false,
+  auth: { signed_in: false, username: null },
+  remoteModels: [],
+  remoteUsername: null,
+  remoteTruncated: false,
+  jobs: [],
+  history: []
 };
 
 const SLICERS = {
@@ -97,13 +107,19 @@ function extCounts(m) {
   return c;
 }
 
-function slugFromSource(src) {
-  return (src.split('/model/')[1] || 'local-import').split(/[?#]/)[0];
+function localPath(m) {
+  // The backend reports the real directory. Never re-derive it from the URL:
+  // the on-disk slug can differ from the slug in the link.
+  if (m && m.dir) return m.dir.endsWith('/') ? m.dir : m.dir + '/';
+  return '';
 }
 
-function localPath(m) {
-  const lib = state.prefs.library_folder || '~/Printables Library';
-  return `${lib}/${slugFromSource(m.source)}/`;
+function filePath(m, name) {
+  return localPath(m) + 'files/' + name;
+}
+
+function currentModel() {
+  return state.models.find(x => x.id === state.detailId) || null;
 }
 
 function titleCase(s) {
@@ -228,6 +244,8 @@ function renderTopbar() {
       <h1 class="topbar-title">${esc(m ? m.name : '')}</h1>`;
   } else if (state.view === 'clone') {
     ctxHTML = `<h1 class="topbar-title">Download / Clone</h1>`;
+  } else if (state.view === 'account') {
+    ctxHTML = `<h1 class="topbar-title">My Models</h1>`;
   } else {
     ctxHTML = `<h1 class="topbar-title">Preferences</h1>`;
   }
@@ -651,14 +669,15 @@ async function startClone(url) {
       if (p.percent !== undefined) $('#clone-pct').textContent = Math.round(p.percent) + '%';
     });
 
-    const unlistenDone = await Bridge.listen(`clone://${jobId}/done`, async () => {
+    const unlistenDone = await Bridge.listen(`clone://${jobId}/done`, async (event) => {
       unlistenProgress();
       unlistenDone();
       unlistenError();
+      const payload = event.payload || {};
       await refreshLibrary();
       $('#clone-progress').classList.add('hidden');
-      $('#success-title').textContent = `${titleCase(slug.replace(/[-_]+/g, ' '))} cloned`;
-      $('#success-path').textContent = `${state.prefs.library_folder || '~/Printables Library'}/${slug}/`;
+      $('#success-title').textContent = `${payload.name || titleCase(slug.replace(/[-_]+/g, ' '))} cloned`;
+      $('#success-path').textContent = payload.model_dir || `${state.prefs.library_folder || '~/Printables Library'}/${slug}/`;
       $('#clone-success').classList.remove('hidden');
       toast('Model added to library', 'clone complete');
     });
@@ -727,8 +746,14 @@ function showView(v) {
   renderSidebarCollections();
   renderTopbar();
   if (v === 'library') renderLibrary();
+  if (v === 'detail') loadHistory();
+  if (v === 'account') {
+    renderAccount();
+    if (state.auth && state.auth.signed_in && !state.remoteModels.length) refreshRemoteModels();
+  }
   if (v === 'settings') {
     $('#library-path').value = state.prefs.library_folder || 'Not set';
+    applySyncSettingsUI();
     updateStats();
   }
   window.scrollTo(0, 0);
@@ -738,7 +763,8 @@ function showView(v) {
 function slicerName() { return SLICERS[state.prefs.slicer_key]?.[0] || 'PrusaSlicer'; }
 
 function actOpenInSlicer(m) {
-  const files = (m.files || []).map(f => localPath(m) + f.n);
+  if (!m) return;
+  const files = (m.files || []).map(f => filePath(m, f.n));
   Bridge.call('open_in_slicer', { modelId: m.id, slicer: slicerName(), files })
     .then(() => toast(`Launching ${slicerName()}…`, 'invoke open_in_slicer'))
     .catch(err => toast('Failed to launch slicer', err.message || err));
@@ -772,8 +798,9 @@ function actDelete(m) {
 }
 
 function actSliceFile(name) {
-  const m = state.models.find(x => x.id === state.detailId);
-  const file = localPath(m) + name;
+  const m = currentModel();
+  if (!m) return;
+  const file = filePath(m, name);
   Bridge.call('slice_file', { file })
     .then(() => toast(`Slicing ${name}…`, 'invoke slice_file'))
     .catch(err => toast('Failed to slice', err.message || err));
@@ -783,6 +810,439 @@ function actOpenExternal(url) {
   Bridge.call('open_external', { url })
     .then(() => toast('Opening URL…', 'invoke open_external'))
     .catch(err => toast('Failed to open URL', err.message || err));
+}
+
+/* ============================ ACCOUNT & SYNC ============================ */
+function authSignedIn() { return !!(state.auth && state.auth.signed_in); }
+
+async function refreshAuth() {
+  try {
+    const status = await Bridge.call('auth_status', {});
+    state.auth = status || { signed_in: false };
+  } catch (err) {
+    console.warn('auth_status failed:', err);
+    state.auth = { signed_in: false };
+  }
+  renderAccountFoot();
+}
+
+function renderAccountFoot() {
+  const nameEl = $('#account-name');
+  if (!nameEl) return;
+  const signed = authSignedIn();
+  const name = state.auth.username || (signed ? 'Printables account' : 'Not signed in');
+  nameEl.textContent = name;
+  $('#account-sub').textContent = signed ? 'Signed in · Keychain' : 'Printables account';
+  $('#account-avatar').textContent = (name.trim().charAt(0) || '?').toUpperCase();
+  $('#account-action').textContent = signed ? 'Sign out' : 'Sign in';
+  const count = $('#nav-account-count');
+  if (count) count.textContent = state.remoteModels.length ? String(state.remoteModels.length) : '';
+}
+
+function accountNotice(text, isError) {
+  const el = $('#account-notice');
+  if (!el) return;
+  if (!text) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.textContent = text;
+  el.classList.toggle('is-error', !!isError);
+  el.classList.remove('hidden');
+}
+
+async function actLogin() {
+  try {
+    await Bridge.call('auth_login', {});
+    toast('Sign in', 'Finish signing in in the window that just opened');
+  } catch (err) {
+    toast('Cannot open sign-in', err.message || err);
+  }
+}
+
+async function actLogout() {
+  try {
+    await Bridge.call('auth_logout', {});
+    state.auth = { signed_in: false, username: null };
+    state.remoteModels = [];
+    state.remoteUsername = null;
+    renderAccount();
+    toast('Signed out', 'Session removed from the Keychain');
+  } catch (err) {
+    toast('Sign out failed', err.message || err);
+  }
+}
+
+async function refreshRemoteModels() {
+  if (!authSignedIn()) { renderAccount(); return; }
+  const grid = $('#remote-grid');
+  if (grid) grid.innerHTML = '<div class="remote-loading">Loading your models…</div>';
+  accountNotice('');
+  try {
+    const data = await Bridge.call('account_models', {});
+    state.remoteModels = data.models || [];
+    state.remoteUsername = data.username || state.auth.username;
+    state.remoteTruncated = !!data.truncated;
+    if (state.remoteTruncated) {
+      accountNotice('Printables returned only the first page of results for this account.');
+    }
+    renderAccount();
+  } catch (err) {
+    if (grid) grid.innerHTML = '';
+    accountNotice(`Could not list your models: ${err.message || err}`, true);
+  }
+}
+
+function renderAccount() {
+  renderAccountFoot();
+  const desc = $('#account-desc');
+  const actions = $('#account-actions');
+  const grid = $('#remote-grid');
+  const empty = $('#account-empty');
+  if (!desc || !actions || !grid || !empty) return;
+
+  if (!authSignedIn()) {
+    desc.textContent = 'Sign in to Printables to sync the models you authored. The session is stored in the macOS Keychain.';
+    actions.innerHTML = `<button class="btn btn-primary" id="account-signin">Sign in to Printables</button>`;
+    $('#account-signin').addEventListener('click', actLogin);
+    grid.innerHTML = '';
+    empty.classList.add('hidden');
+    $('#sync-jobs').classList.add('hidden');
+    return;
+  }
+
+  const who = state.remoteUsername || state.auth.username || 'your account';
+  const count = state.remoteModels.length;
+  desc.textContent = `Signed in as ${who}${count ? ` · ${count} model(s)` : ''}`;
+  actions.innerHTML = `
+    <button class="btn btn-secondary btn-sm" id="account-refresh">Refresh list</button>
+    <button class="btn btn-primary btn-sm" id="account-sync-all">Sync all models</button>`;
+  $('#account-refresh').addEventListener('click', refreshRemoteModels);
+  $('#account-sync-all').addEventListener('click', actSyncAll);
+
+  grid.innerHTML = state.remoteModels.map(remoteCardHTML).join('');
+  empty.classList.toggle('hidden', count > 0);
+  renderSyncJobs();
+}
+
+function remoteCardHTML(m) {
+  const thumb = m.cover_url
+    ? `<img src="${esc(m.cover_url)}" alt="" loading="lazy" />`
+    : GHOST;
+  return `
+  <article class="remote-card">
+    <div class="remote-thumb">${thumb}</div>
+    <div class="remote-body">
+      <h3 class="remote-name">${esc(m.name)}</h3>
+      <div class="remote-meta">
+        ${m.local ? '<span class="pill is-ok">In library</span>' : '<span class="pill">Not local</span>'}
+      </div>
+      <div class="remote-actions">
+        ${m.local ? `<button class="btn btn-secondary btn-sm" data-remote-open="${m.id}">Open</button>` : ''}
+        <button class="btn btn-primary btn-sm" data-remote-sync="${m.id}">${m.local ? 'Update' : 'Download'}</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+async function actSyncAll() {
+  try {
+    const jobId = await Bridge.call('sync_all', {});
+    accountNotice('Sync started. Progress appears below and in the sidebar.');
+    trackJob(jobId);
+  } catch (err) {
+    accountNotice(`Sync failed to start: ${err.message || err}`, true);
+    toast('Sync failed', err.message || err);
+  }
+}
+
+async function actSyncModel(modelId) {
+  try {
+    const jobId = await Bridge.call('sync_model', { modelId });
+    trackJob(jobId);
+    toast('Downloading model', `job ${jobId.slice(0, 8)}`);
+  } catch (err) {
+    toast('Download failed', err.message || err);
+  }
+}
+
+function trackJob(jobId) {
+  if (!jobId) return;
+  if (!state.jobs.some(j => j.id === jobId)) {
+    state.jobs.unshift({
+      id: jobId, label: 'Starting…', state: 'queued', percent: 0, message: 'Queued'
+    });
+  }
+  renderSyncJobs();
+}
+
+function renderSyncJobs() {
+  const wrap = $('#sync-jobs');
+  if (!wrap) return;
+  const jobs = state.jobs.filter(j => ['queued', 'running', 'failed'].includes(j.state)).slice(0, 6);
+  if (!jobs.length) {
+    wrap.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = jobs.map(j => `
+    <div class="sync-job">
+      <div class="sync-job-top">
+        <span>${esc(j.label || 'Sync')}</span>
+        <span class="mono">${Math.round(j.percent || 0)}%</span>
+      </div>
+      <div class="sync-job-msg">${esc(j.error || j.message || '')}</div>
+      <div class="progress"><div class="progress-fill" style="width:${Math.round(j.percent || 0)}%"></div></div>
+      ${['queued', 'running'].includes(j.state)
+        ? `<button class="btn btn-ghost btn-sm" data-cancel-job="${j.id}">Cancel</button>` : ''}
+    </div>`).join('');
+}
+
+async function cancelJob(jobId) {
+  try {
+    await Bridge.call('sync_cancel', { jobId });
+    toast('Job cancelled');
+  } catch (err) {
+    toast('Cannot cancel job', err.message || err);
+  }
+}
+
+/* ============================ HISTORY & PUSH ============================ */
+async function loadHistory() {
+  const list = $('#detail-history');
+  const actions = $('#detail-history-actions');
+  if (!list || !actions) return;
+  const m = currentModel();
+  if (!m) return;
+
+  list.innerHTML = '<div class="history-empty">Loading…</div>';
+  actions.innerHTML = '';
+
+  try {
+    const commits = await Bridge.call('git_log', { modelId: m.id, limit: 30 }) || [];
+    state.history = commits;
+
+    if (!commits.length) {
+      list.innerHTML = `<div class="history-empty">${m.has_git ? 'No commits yet.' : 'Not tracked by git yet.'}</div>`;
+      actions.innerHTML = `<button class="btn btn-secondary btn-sm" id="history-init">Start tracking</button>`;
+      $('#history-init').addEventListener('click', () => actGitInit(m));
+      return;
+    }
+
+    list.innerHTML = commits.map((c, i) => `
+      <div class="history-row">
+        <div class="history-main">
+          <span class="history-summary">${esc(c.summary)}</span>
+          <span class="history-meta mono">${esc(c.short_id)} · ${fmtDate(c.time, true)}</span>
+        </div>
+        ${i === 0 ? '' : `<button class="history-restore" data-commit="${esc(c.id)}">restore</button>`}
+      </div>`).join('');
+
+    actions.innerHTML = `
+      <button class="btn btn-secondary btn-sm" id="history-commit">Commit now</button>
+      <button class="btn btn-primary btn-sm" id="history-push">Push changes…</button>`;
+    $('#history-commit').addEventListener('click', () => actGitCommit(m));
+    $('#history-push').addEventListener('click', () => actPushPreview(m));
+  } catch (err) {
+    list.innerHTML = `<div class="history-empty">History unavailable: ${esc(err.message || err)}</div>`;
+  }
+}
+
+async function actGitInit(m) {
+  try {
+    await Bridge.call('git_init', { modelId: m.id });
+    toast('Tracking started', 'Initial commit created');
+    await refreshLibrary();
+    loadHistory();
+  } catch (err) {
+    toast('Cannot start tracking', err.message || err);
+  }
+}
+
+async function actGitCommit(m) {
+  const message = await promptText('Commit message', 'Manual commit');
+  if (message === null) return;
+  try {
+    const id = await Bridge.call('git_commit', { modelId: m.id, message });
+    toast(id ? 'Committed' : 'Nothing to commit', id ? id.slice(0, 8) : 'folder is unchanged');
+    await refreshLibrary();
+    loadHistory();
+  } catch (err) {
+    toast('Commit failed', err.message || err);
+  }
+}
+
+async function actGitRestore(m, commitId) {
+  if (!confirm('Restore this revision?\n\nThe folder is rewritten to that state and a new commit records the restore.')) return;
+  try {
+    await Bridge.call('git_restore', { modelId: m.id, commitId });
+    toast('Revision restored');
+    await refreshLibrary();
+    loadHistory();
+  } catch (err) {
+    toast('Restore failed', err.message || err);
+  }
+}
+
+function ensurePushModal() {
+  let modal = $('#push-modal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'push-modal';
+  modal.className = 'modal-overlay hidden';
+  modal.innerHTML = `
+    <div class="modal push-modal">
+      <h3 id="push-title">Review changes</h3>
+      <div class="push-body" id="push-body"></div>
+      <div class="push-warnings" id="push-warnings"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="push-cancel">Cancel</button>
+        <button class="btn btn-secondary" id="push-dryrun">Dry run</button>
+        <button class="btn btn-primary" id="push-apply">Push to printables.com</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.add('hidden'); });
+  $('#push-cancel').addEventListener('click', () => modal.classList.add('hidden'));
+  return modal;
+}
+
+async function actPushPreview(m) {
+  const modal = ensurePushModal();
+  const body = $('#push-body');
+  body.innerHTML = '<div class="history-empty">Comparing folder with printables.com…</div>';
+  $('#push-warnings').innerHTML = '';
+  modal.classList.remove('hidden');
+
+  try {
+    const plan = await Bridge.call('push_preview', { modelId: m.id });
+    state.pendingPlan = plan;
+
+    if (!plan.operations.length) {
+      body.innerHTML = '<p class="push-empty">Nothing to push — this folder matches printables.com.</p>';
+      $('#push-apply').disabled = true;
+      return;
+    }
+
+    body.innerHTML = `
+      <p class="push-count">${plan.operations.length} change(s) would be sent:</p>
+      <ul class="push-list">${plan.operations.map(op => `
+        <li class="push-op push-op-${esc(op.kind)}">
+          <span class="push-op-kind">${esc(op.kind.replace('_', ' '))}</span>
+          <span class="push-op-summary">${esc(op.summary)}</span>
+          ${op.detail ? `<span class="push-op-detail">${esc(op.detail)}</span>` : ''}
+        </li>`).join('')}</ul>`;
+
+    const warnings = [...(plan.warnings || [])];
+    if (!plan.write_enabled) {
+      warnings.push('Pushing is disabled in Preferences. Enable “Allow pushing to printables.com” to publish.');
+    }
+    $('#push-warnings').innerHTML = warnings.map(w => `<div class="push-warning">${esc(w)}</div>`).join('');
+
+    const applyBtn = $('#push-apply');
+    applyBtn.disabled = !plan.write_enabled || plan.remote_changed;
+    applyBtn.onclick = () => actPushApply(m, plan, false);
+    $('#push-dryrun').onclick = () => actPushApply(m, plan, true);
+  } catch (err) {
+    body.innerHTML = `<p class="push-empty is-error">${esc(err.message || err)}</p>`;
+    $('#push-apply').disabled = true;
+  }
+}
+
+async function actPushApply(m, plan, dryRun) {
+  const body = $('#push-body');
+  try {
+    const report = await Bridge.call('push_apply', {
+      modelId: m.id, planId: plan.plan_id, dryRun
+    });
+    const lines = [];
+    if (report.dry_run) lines.push('<p class="push-empty">Dry run — nothing was sent.</p>');
+    if (report.applied.length) {
+      lines.push(`<ul class="push-list">${report.applied.map(a => `<li class="push-op">${esc(a)}</li>`).join('')}</ul>`);
+    }
+    if (report.errors.length) {
+      lines.push(`<div class="push-warnings">${report.errors.map(e => `<div class="push-warning">${esc(e)}</div>`).join('')}</div>`);
+    }
+    if (!report.applied.length && !report.errors.length) {
+      lines.push(`<p class="push-empty">${esc(report.skipped.join(' '))}</p>`);
+    }
+    body.innerHTML = lines.join('') || '<p class="push-empty">Done.</p>';
+    toast(dryRun ? 'Dry run complete' : 'Push complete', report.committed ? 'Committed locally' : '');
+    if (!dryRun) { await refreshLibrary(); loadHistory(); }
+  } catch (err) {
+    body.innerHTML = `<p class="push-empty is-error">${esc(err.message || err)}</p>`;
+    toast('Push failed', err.message || err);
+  }
+}
+
+/* ============================ SYNC SETTINGS ============================ */
+function applySyncSettingsUI() {
+  const git = $('#pref-git-enabled');
+  if (!git) return;
+  git.checked = !!state.prefs.git_enabled;
+  $('#pref-auto-commit').checked = !!state.prefs.auto_commit_local_edits;
+  $('#pref-concurrency').value = state.prefs.sync_concurrency || 3;
+  $('#pref-remote-write').checked = !!state.prefs.remote_write_enabled;
+}
+
+async function saveSyncPref(patch) {
+  try {
+    const prefs = await Bridge.call('set_prefs', patch);
+    state.prefs = { ...state.prefs, ...prefs };
+    applySyncSettingsUI();
+  } catch (err) {
+    toast('Failed to save setting', err.message || err);
+  }
+}
+
+async function showCapabilities() {
+  const hint = $('#capability-hint');
+  if (!hint) return;
+  try {
+    const caps = await Bridge.call('auth_cached_capabilities', {});
+    if (!caps || !caps.discovered_at) { hint.textContent = 'Not probed yet.'; return; }
+    const role = (r) => caps.roles?.[r] || 'not available';
+    hint.textContent = `Probed ${fmtDate(caps.discovered_at)} — upload: ${role('add_file')}, delete: ${role('delete_file')}, update: ${role('update_model')}`;
+  } catch (_) {
+    hint.textContent = 'Not probed yet.';
+  }
+}
+
+function wireSyncSettings() {
+  const git = $('#pref-git-enabled');
+  if (!git) return;
+  git.addEventListener('change', () => saveSyncPref({ git_enabled: git.checked }));
+  $('#pref-auto-commit').addEventListener('change', e =>
+    saveSyncPref({ auto_commit_local_edits: e.target.checked }));
+  $('#pref-concurrency').addEventListener('change', e =>
+    saveSyncPref({ sync_concurrency: Number(e.target.value) || 3 }));
+  $('#pref-remote-write').addEventListener('change', e =>
+    saveSyncPref({ remote_write_enabled: e.target.checked }));
+
+  $('#probe-write-api').addEventListener('click', async () => {
+    try {
+      const caps = await Bridge.call('auth_probe_write_api', {});
+      $('#capability-hint').textContent =
+        `Probed — upload: ${caps.roles?.add_file || 'not available'}, delete: ${caps.roles?.delete_file || 'not available'}, update: ${caps.roles?.update_model || 'not available'}`;
+      toast('Write API probed', `${caps.fields?.length || 0} mutations discovered`);
+    } catch (err) {
+      $('#capability-hint').textContent = err.message || 'Probe failed';
+      toast('Probe failed', err.message || err);
+    }
+  });
+
+  $('#adopt-models').addEventListener('click', async () => {
+    try {
+      const n = await Bridge.call('git_adopt_library', {});
+      toast('Models adopted', `${n} folder(s) now under version control`);
+      await refreshLibrary();
+      renderLibrary();
+    } catch (err) {
+      toast('Adoption failed', err.message || err);
+    }
+  });
+
+  $('#open-config').addEventListener('click', () => {
+    Bridge.call('open_config_folder', {}).catch(err => toast('Cannot open folder', err.message || err));
+  });
 }
 
 /* ============================ MODAL PROMPT ============================ */
@@ -1110,10 +1570,69 @@ $('#maint-rescan').addEventListener('click', () => {
     .catch(err => toast('Failed to rescan library', err.message || err));
 });
 
+/* account & sync */
+$('#account-action').addEventListener('click', () => authSignedIn() ? actLogout() : actLogin());
+$('#remote-grid').addEventListener('click', e => {
+  const syncBtn = e.target.closest('[data-remote-sync]');
+  if (syncBtn) { actSyncModel(syncBtn.dataset.remoteSync); return; }
+  const openBtn = e.target.closest('[data-remote-open]');
+  if (openBtn) {
+    const local = state.models.find(m => m.id === openBtn.dataset.remoteOpen);
+    if (local) openDetail(local.id); else actSyncModel(openBtn.dataset.remoteOpen);
+  }
+});
+$('#sync-jobs').addEventListener('click', e => {
+  const btn = e.target.closest('[data-cancel-job]');
+  if (btn) cancelJob(btn.dataset.cancelJob);
+});
+$('#detail-history').addEventListener('click', e => {
+  const btn = e.target.closest('[data-commit]');
+  const m = currentModel();
+  if (btn && m) actGitRestore(m, btn.dataset.commit);
+});
+
+async function wireBackendEvents() {
+  await Bridge.listen('job://update', event => {
+    const job = event.payload;
+    const idx = state.jobs.findIndex(j => j.id === job.id);
+    if (idx === -1) state.jobs.unshift(job); else state.jobs[idx] = job;
+    if (state.view === 'account') renderSyncJobs();
+  });
+
+  await Bridge.listen('sync://batch', async event => {
+    const summary = event.payload || {};
+    await refreshLibrary();
+    await refreshCollections();
+    renderSidebarCollections();
+    if (state.view === 'library') renderLibrary();
+    if (state.view === 'account') await refreshRemoteModels();
+    toast('Sync finished', `${summary.synced || 0} synced · ${summary.failed || 0} failed`);
+  });
+
+  await Bridge.listen('auth://changed', async event => {
+    const payload = event.payload || {};
+    state.auth = { signed_in: !!payload.signed_in, username: payload.username || null };
+    renderAccount();
+    if (authSignedIn()) refreshRemoteModels();
+    toast('Signed in', payload.username || 'Printables account connected');
+  });
+
+  await Bridge.listen('auth://error', event => {
+    toast('Sign-in problem', (event.payload && event.payload.message) || 'unknown error');
+  });
+
+  await Bridge.listen('library://model-changed', async event => {
+    const payload = event.payload || {};
+    if (payload.committed) toast('Local edits committed', payload.committed.slice(0, 8));
+    await refreshLibrary();
+    if (state.view === 'library') renderLibrary();
+  });
+}
+
 /* GitHub link */
 $('#github-link').addEventListener('click', e => {
   e.preventDefault();
-  actOpenExternal('https://github.com/JacRob32/Printables-Offline');
+  actOpenExternal('https://github.com/jklock/PrintablesManager');
 });
 
 /* keyboard */
@@ -1142,13 +1661,26 @@ async function init() {
   $('#slicer-select').value = state.prefs.slicer_key || 'prusa';
   $('#slicer-path').value = state.prefs.slicer_executable || SLICERS[state.prefs.slicer_key]?.[1] || '';
   $('#library-path').value = state.prefs.library_folder || 'Not set';
+
+  wireSyncSettings();
+  applySyncSettingsUI();
+  await refreshAuth();
+  showCapabilities();
+  await wireBackendEvents();
+
   await refreshLibrary();
   await refreshCollections();
   renderSidebarCollections();
   renderTopbar();
   renderLibrary();
   renderRecent();
+  renderAccountFoot();
   updateStats();
+
+  if (state.prefs.auto_sync_on_launch && authSignedIn()) {
+    refreshRemoteModels().then(actSyncAll);
+  }
+
   console.info('%cPrintables Offline%c — Tauri IPC active.', 'font-weight:700;color:#FF5701', '');
 }
 
