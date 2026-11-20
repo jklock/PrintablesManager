@@ -146,6 +146,22 @@ if [ -n "${NOTARY_PROFILE:-}" ]; then
   else
     printf '   skipping notarization: %s cannot be notarized (needs Developer ID Application)\n' "$AUTHORITY"
   fi
+elif [ -n "${AUTHORITY##*Developer ID*}" ]; then
+  # No profile and no Developer ID: nothing to notarize, say nothing.
+  :
+elif xcrun notarytool history --keychain-profile pm-notary >/dev/null 2>&1; then
+  printf '   notarization: credentials exist (pm-notary) but NOTARY_PROFILE was not set\n'
+  printf '   run: NOTARY_PROFILE=pm-notary %s\n' "$0"
+else
+  printf '   notarization: skipped - no notarytool credentials on this Mac\n'
+  printf '   this bundle runs locally (it carries no quarantine flag); Gatekeeper only\n'
+  printf '   objects to a downloaded copy. To ship it to another Mac either notarize:\n'
+  printf '     xcrun notarytool store-credentials pm-notary \\\n'
+  printf '       --apple-id <your apple id> --team-id <team id>   # needs an APP-SPECIFIC password\n'
+  printf '     NOTARY_PROFILE=pm-notary %s\n' "$0"
+  printf '   ...or ship it unnotarized and have the recipient clear the flag once:\n'
+  printf '     xattr -dr com.apple.quarantine "/Applications/Printables Manager.app"\n'
+  printf '   see docs/distribution.md\n'
 fi
 
 step "MCP server present"
