@@ -23,11 +23,11 @@ MOUNT="/tmp/pm-install"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 if [ -z "$SIGNING_IDENTITY" ]; then
   SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-    | awk -F'"' '/Developer ID Application/{print $1; exit}' | tr -d ' ') "
+    | awk -F'"' '/Developer ID Application/{print $2; exit}')"
 fi
 if [ -z "$SIGNING_IDENTITY" ]; then
   SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-    | awk -F'"' '/Apple Development/{print $1; exit}' | tr -d ' ')"
+    | awk -F'"' '/Apple Development/{print $2; exit}')"
 fi
 INSTALLED="/Applications/${APP_NAME}.app"
 
@@ -120,15 +120,14 @@ BUNDLE="$(defaults read "$INSTALLED/Contents/Info.plist" CFBundleIdentifier)"
 # An ad-hoc signature gets a new CDHash on every build, and macOS then treats the
 # app as a stranger: Keychain access and external-volume access are re-asked every
 # single time. Re-sign with the stable Developer identity after installing.
+# Always sign with the chosen identity, not only when the bundle arrives ad-hoc:
+# what shipped must be what the next `codesign -dvv` reports.
+step "Signing with $SIGNING_IDENTITY"
+codesign --force --deep --options runtime \
+  --entitlements "$TAURI_DIR/entitlements.plist" \
+  -s "$SIGNING_IDENTITY" "$INSTALLED"
 AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}' || true)"
-if [ -z "$AUTHORITY" ]; then
-  step "Re-signing with the stable Developer identity"
-  codesign --force --deep --options runtime \
-    --entitlements "$TAURI_DIR/entitlements.plist" \
-    -s "$SIGNING_IDENTITY" "$INSTALLED"
-  AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}' || true)"
-fi
-[ -n "$AUTHORITY" ] || fail "app is still ad-hoc signed - permission prompts would return on every build"
+[ -n "$AUTHORITY" ] || fail "signing produced no Authority - signature is ad-hoc"
 codesign --verify --deep --strict "$INSTALLED" 2>/dev/null || fail "code signature invalid"
 echo "   version    $VERSION"
 echo "   bundle     $BUNDLE"
