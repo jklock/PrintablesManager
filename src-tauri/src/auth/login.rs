@@ -77,6 +77,12 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
         let deadline = std::time::Instant::now() + Duration::from_millis(MAX_WAIT_MS);
         let mut announced = false;
 
+        // Whatever is already in the cookie jar belongs to a previous sign-in.
+        // Remember it so a stale token cannot be mistaken for a fresh login.
+        let _ = window.eval(READ_COOKIES_JS);
+        std::thread::sleep(Duration::from_millis(300));
+        let baseline = read_session_cookies(&window).0;
+
         loop {
             if cancelled_thread.load(Ordering::Relaxed) {
                 break;
@@ -98,6 +104,17 @@ pub fn start_login(app: &AppHandle) -> AppResult<()> {
             let (access, refresh) = read_session_cookies(&window);
 
             if let Some(access_token) = access {
+                // The webview keeps its cookie jar between logins, so the very
+                // first poll sees the *previous* (usually expired) token and the
+                // window used to adopt it and close instantly. Only a token that
+                // is new and still valid counts as a successful sign-in.
+                if Some(&access_token) == baseline.as_ref() {
+                    continue;
+                }
+                if super::is_token_expired(&access_token) {
+                    continue;
+                }
+
                 let _ = app_handle.emit(
                     "auth://progress",
                     serde_json::json!({ "message": "Confirmed. Reading your account…" }),

@@ -400,7 +400,14 @@ fn cookie_from_headers(headers: &reqwest::header::HeaderMap, name: &str) -> Opti
 }
 
 /// Reads the `exp` claim from a JWT. Returns `None` for opaque tokens.
-pub fn token_exp(token: &str) -> Option<i64> {
+pub(crate) fn is_token_expired(token: &str) -> bool {
+    match token_exp(token) {
+        Some(exp) => chrono::Utc::now().timestamp() >= exp - 60,
+        None => false,
+    }
+}
+
+fn token_exp(token: &str) -> Option<i64> {
     use base64::Engine;
     let payload = token.split('.').nth(1)?;
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
