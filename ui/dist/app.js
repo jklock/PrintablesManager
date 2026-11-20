@@ -1029,55 +1029,16 @@ function accountNotice(text, isError) {
   el.classList.remove('hidden');
 }
 
-function openLoginModal() {
-  const modal = $('#login-modal');
-  if (!modal) return;
-  const status = $('#login-status');
-  status.textContent = 'Not started.';
-  status.classList.remove('is-error');
-  modal.classList.remove('hidden');
-}
-
 async function actLogin() {
-  openLoginModal();
+  try {
+    await Bridge.call('auth_login', {});
+    toast('Sign-in window opened', 'Finish signing in there');
+  } catch (err) {
+    toast('Could not open the sign-in window', err.message || err);
+  }
 }
 
-function wireLoginModal() {
-  const modal = $('#login-modal');
-  if (!modal) return;
-  const close = () => modal.classList.add('hidden');
-  $('#login-cancel').addEventListener('click', close);
-  modal.addEventListener('click', e => { if (e.target === modal) close(); });
 
-  $('#login-start').addEventListener('click', async () => {
-    const status = $('#login-status');
-    status.textContent = 'Opening sign-in window…';
-    status.classList.remove('is-error');
-    try {
-      await Bridge.call('auth_login', {});
-    } catch (err) {
-      status.textContent = err.message || String(err);
-      status.classList.add('is-error');
-    }
-  });
-
-  $('#login-token-save').addEventListener('click', async () => {
-    const value = ($('#login-token').value || '').trim();
-    const status = $('#login-status');
-    if (!value) { status.textContent = 'Paste the auth.access_token value first.'; return; }
-    try {
-      const st = await Bridge.call('auth_set_token', { accessToken: value });
-      state.auth = st || { signed_in: false };
-      renderAccount();
-      close();
-      toast('Signed in', state.auth.username || 'token accepted');
-      if (state.view === 'account') refreshRemoteModels();
-    } catch (err) {
-      status.textContent = err.message || String(err);
-      status.classList.add('is-error');
-    }
-  });
-}
 
 async function actLogout() {
   try {
@@ -2241,7 +2202,6 @@ async function init() {
   $('#library-path').value = state.prefs.library_folder || 'Not set';
 
   wireSyncSettings();
-  wireLoginModal();
   wireEditModal();
   applySyncSettingsUI();
 

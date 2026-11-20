@@ -412,64 +412,6 @@
     </div>
   </div>
 
-  <div class="modal-overlay hidden" id="login-modal" role="dialog" aria-modal="true" aria-label="Sign in to Printables">
-    <div class="modal-card login-modal-card">
-      <h3>Sign in to Printables</h3>
-      <ol class="login-steps">
-        <li>Click <strong>Open sign-in window</strong> — the real Printables login page opens in its own window.</li>
-        <li>Sign in with your Prusa Account. Google/Apple sign-in and 2FA work normally, and macOS can autofill the password you already saved in iCloud Keychain.</li>
-        <li>The app reads the session cookie and keeps it in your login Keychain — it never sees or stores your password.</li>
-      </ol>
-      <div class="login-status" id="login-status">Not started.</div>
-      <details class="login-advanced">
-        <summary>Paste a token instead</summary>
-        <p class="setting-hint">In a browser on printables.com, open DevTools → Application → Cookies and copy the value of <code>auth.access_token</code>.</p>
-        <input type="password" id="login-token" placeholder="auth.access_token" autocomplete="off" spellcheck="false" />
-        <button class="btn btn-secondary btn-sm" id="login-token-save" type="button">Use this token</button>
-      </details>
-      <div class="modal-actions">
-        <button class="btn btn-ghost" id="login-cancel" type="button">Cancel</button>
-        <button class="btn btn-primary" id="login-start" type="button">Open sign-in window</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay hidden" id="edit-modal" role="dialog" aria-modal="true" aria-label="Edit model">
-    <div class="modal-card edit-modal-card">
-      <h3>Edit model</h3>
-      <label class="edit-field">
-        <span>Name</span>
-        <input type="text" id="edit-name" autocomplete="off" spellcheck="false" />
-      </label>
-      <label class="edit-field">
-        <span>Tags <em>comma separated</em></span>
-        <input type="text" id="edit-tags" autocomplete="off" spellcheck="false" placeholder="vase, planter, petg" />
-      </label>
-      <div class="edit-split">
-        <label class="edit-field">
-          <span>Description <em>Markdown</em></span>
-          <textarea id="edit-description" rows="12" spellcheck="true" placeholder="## Print settings&#10;- Layer height: 0.2 mm&#10;- **Supports:** no"></textarea>
-        </label>
-        <div class="edit-field">
-          <span>Preview</span>
-          <div class="edit-preview" id="edit-preview"></div>
-        </div>
-      </div>
-      <div class="edit-files">
-        <div class="edit-files-head">
-          <span>Files</span>
-          <button class="btn btn-secondary btn-sm" id="edit-add-files" type="button">Add files…</button>
-        </div>
-        <ul class="edit-file-list" id="edit-file-list"></ul>
-      </div>
-      <div class="login-status" id="edit-status"></div>
-      <div class="modal-actions">
-        <button class="btn btn-ghost" id="edit-cancel" type="button">Cancel</button>
-        <button class="btn btn-primary" id="edit-save" type="button">Save &amp; commit</button>
-      </div>
-    </div>
-  </div>
-
   <script type="module" src="app.js"></script>
 </body>
 </html>
