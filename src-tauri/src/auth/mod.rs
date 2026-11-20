@@ -123,7 +123,9 @@ impl StoredSession {
     /// valid forever while every API call 401s - which showed up as "signed in"
     /// in the UI and "download failed" on every request.
     pub fn expiry(&self) -> Option<i64> {
-        self.expires_at.or_else(|| token_exp(&self.access_token))
+        // The token is the authority. A stale expires_at over a dead token is
+        // exactly how the app ended up saying "connected" while the API 401'd.
+        token_exp(&self.access_token).or(self.expires_at)
     }
 
     pub fn is_expired(&self) -> bool {
