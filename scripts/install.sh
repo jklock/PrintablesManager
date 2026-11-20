@@ -18,7 +18,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAURI_DIR="$ROOT/src-tauri"
 DMG="$TAURI_DIR/target/release/bundle/dmg/${APP_NAME}_2.0.0_aarch64.dmg"
 MOUNT="/tmp/pm-install"
-SIGNING_IDENTITY="49C2A7CDD2C1C84BDE7F719CB4B359E61AF7227C"
+# Prefer a Developer ID (the only kind Apple will notarize); fall back to the
+# Apple Development cert, which is still a stable identity across rebuilds.
+SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
+if [ -z "$SIGNING_IDENTITY" ]; then
+  SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application/{print $1; exit}' | tr -d ' ') "
+fi
+if [ -z "$SIGNING_IDENTITY" ]; then
+  SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Apple Development/{print $1; exit}' | tr -d ' ')"
+fi
 INSTALLED="/Applications/${APP_NAME}.app"
 
 CLEAN=0
@@ -126,6 +136,18 @@ echo "   signature  ${AUTHORITY:-(ad-hoc)}"
 echo "   installed  $INSTALLED"
 
 if mount | grep -q "on ${MOUNT} "; then fail "install volume still mounted"; fi
+
+# Notarization needs a Developer ID signature and credentials that were stored in
+# the keychain by the account owner - never read from or written by this script.
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+  if [ -z "${AUTHORITY##*Developer ID*}" ]; then
+    step "Notarizing (profile: $NOTARY_PROFILE)"
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
+  else
+    printf '   skipping notarization: %s cannot be notarized (needs Developer ID Application)\n' "$AUTHORITY"
+  fi
+fi
 
 step "MCP server present"
 [ -x "$INSTALLED/Contents/MacOS/printables-manager-mcp" ] || fail "MCP binary missing from the bundle"
