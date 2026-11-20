@@ -964,16 +964,37 @@ async function refreshAuth() {
   renderCredentialStorage();
 }
 
+/**
+ * The one description of the account state, used by the sidebar, My Models and
+ * Preferences. Three places inventing their own wording is how "signed in" and
+ * "download failed" ended up on screen together.
+ */
+function authLabel() {
+  const a = state.auth || {};
+  if (a.signed_in) {
+    return {
+      name: a.username || 'Printables account',
+      sub: 'Connected',
+      detail: a.expires_at
+        ? `Session valid until ${new Date(a.expires_at * 1000).toLocaleString()}`
+        : 'Session active'
+    };
+  }
+  if (a.expired && a.can_refresh) {
+    return { name: a.username || 'Printables account', sub: 'Session expired — refreshing…', detail: 'Renewing the session' };
+  }
+  if (a.expired) {
+    return { name: a.username || 'Printables account', sub: 'Session expired — sign in again', detail: 'Sign in again to sync' };
+  }
+  return { name: 'Not signed in', sub: 'Printables account', detail: 'Not signed in.' };
+}
+
 function renderAccountFoot() {
   const nameEl = $('#account-name');
   if (!nameEl) return;
-  const signed = authSignedIn();
-  const name = state.auth.username || (signed ? 'Printables account' : 'Not signed in');
-  nameEl.textContent = name;
-  const backend = state.auth.storage === 'keychain'
-    ? 'Keychain'
-    : (state.auth.storage === 'file' ? 'file fallback' : 'Keychain');
-  $('#account-sub').textContent = signed ? `Signed in · ${backend}` : 'Printables account';
+  const label = authLabel();
+  nameEl.textContent = label.name;
+  $('#account-sub').textContent = label.sub;
   $('#account-avatar').textContent = (name.trim().charAt(0) || '?').toUpperCase();
   $('#account-action').textContent = signed ? 'Sign out' : 'Sign in';
   const count = $('#nav-account-count');
@@ -986,12 +1007,13 @@ function renderCredentialStorage() {
   const auth = state.auth || {};
   const retry = $('#retry-keychain');
 
+  const label = authLabel();
   if (auth.storage === 'keychain') {
-    el.textContent = 'Stored in the login Keychain — nothing is written outside it.';
+    el.textContent = `Keychain · ${label.detail}`;
     if (retry) retry.classList.add('hidden');
   } else if (auth.storage === 'file') {
-    el.textContent = auth.storage_warning || 'Stored in a file because the Keychain refused the write.';
-    if (retry) retry.classList.remove('hidden');
+    el.textContent = `Protected file · ${label.detail}`;
+    if (retry) retry.classList.add('hidden');
   } else {
     el.textContent = 'Not signed in.';
     if (retry) retry.classList.add('hidden');
@@ -1115,7 +1137,7 @@ function renderAccount() {
   if (!desc || !actions || !grid || !empty) return;
 
   if (!authSignedIn()) {
-    desc.textContent = 'Sign in to Printables to sync the models you authored. The session is stored in the macOS Keychain.';
+    desc.textContent = `${authLabel().sub}. Sign in to sync the models you authored.`;
     actions.innerHTML = `<button class="btn btn-primary" id="account-signin">Sign in to Printables</button>`;
     $('#account-signin').addEventListener('click', actLogin);
     grid.innerHTML = '';
@@ -2239,6 +2261,15 @@ async function init() {
   try { await Bridge.call('ui_ready', {}); } catch (_) {}
 
   await refreshAuth();
+  if (state.auth && state.auth.expired && state.auth.can_refresh) {
+    try {
+      state.auth = await Bridge.call('auth_refresh', {}) || state.auth;
+    } catch (err) {
+      console.warn('session refresh failed:', err);
+    }
+    renderAccountFoot();
+    renderCredentialStorage();
+  }
   showCapabilities();
   refreshSlicerStatus();
   await wireBackendEvents();

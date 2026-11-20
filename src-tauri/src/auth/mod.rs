@@ -118,8 +118,16 @@ pub struct StoredSession {
 }
 
 impl StoredSession {
+    /// Expiry is taken from the stored field, and falls back to the JWT's own
+    /// `exp`. Without that fallback a session written without `expires_at` looks
+    /// valid forever while every API call 401s - which showed up as "signed in"
+    /// in the UI and "download failed" on every request.
+    pub fn expiry(&self) -> Option<i64> {
+        self.expires_at.or_else(|| token_exp(&self.access_token))
+    }
+
     pub fn is_expired(&self) -> bool {
-        match self.expires_at {
+        match self.expiry() {
             Some(exp) => chrono::Utc::now().timestamp() >= exp - 60,
             None => false,
         }
@@ -192,7 +200,7 @@ impl AuthState {
             Some(s) => AuthStatus {
                 signed_in: !s.is_expired(),
                 username: s.username.clone(),
-                expires_at: s.expires_at,
+                expires_at: s.expiry(),
                 expired: s.is_expired(),
                 storage: Some(s.backend.clone()),
                 storage_warning: if s.backend == "keychain" {
@@ -359,8 +367,8 @@ impl AuthState {
                 backend: String::new(),
             })
         };
-        session.expires_at = token_exp(&access_token);
         session.access_token = access_token;
+        session.expires_at = token_exp(&session.access_token);
         if let Some(new_refresh) = cookie_from_headers(&headers, "auth.refresh_token") {
             session.refresh_token = Some(new_refresh);
         }
