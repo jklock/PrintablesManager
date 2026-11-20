@@ -17,6 +17,10 @@ pub mod mcp;
 
 /// `Printables Manager --selftest`: prints what the app can actually do on this
 /// machine. Used for support and for verifying a freshly installed bundle.
+fn me_account(session: &auth::StoredSession) -> Option<String> {
+    session.user_id.clone()
+}
+
 pub fn selftest() {
     println!(
         "Printables Manager {} — selftest",
@@ -52,6 +56,73 @@ pub fn selftest() {
 
     // Reading the session can raise a Keychain permission dialog, so it is opt-in:
     //   printables-manager --selftest --with-session
+    if std::env::args().any(|arg| arg == "--network") {
+        match (auth::load_session(), config::load_prefs()) {
+            (Ok(Some(session)), Ok(prefs)) => {
+                match crate::printables::api::PrintablesClient::with_token(Some(
+                    session.access_token.clone(),
+                )) {
+                    Ok(client) => {
+                        match client.viewer() {
+                            Ok(me) => println!("network      : me -> {:?}", me.public_username),
+                            Err(e) => println!("network      : me FAILED ({})", e.message),
+                        }
+                        if let Some(id) = me_account(&session) {
+                            match client.user_collections(&id) {
+                                Ok(cols) => {
+                                    println!("network      : collections -> {}", cols.len());
+                                    for c in cols.iter().take(5) {
+                                        match client.collection_model_ids(&c.id) {
+                                            Ok(ids) => println!(
+                                                "network      :   {} ({}) -> {} models",
+                                                c.name,
+                                                c.prints_count,
+                                                ids.len()
+                                            ),
+                                            Err(e) => println!(
+                                                "network      :   {} -> ERROR {}",
+                                                c.name, e.message
+                                            ),
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("network      : collections FAILED ({})", e.message)
+                                }
+                            }
+                        }
+                        if let Ok(lib) = config::library_dir(&prefs) {
+                            if let Ok(Some(_)) = auth::load_session() {
+                                // Prove the download path itself, on one model.
+                                match crate::printables::clone::pull_model(
+                                    &client,
+                                    "358633",
+                                    &lib,
+                                    &crate::printables::clone::PullOptions {
+                                        force: false,
+                                        git: prefs.git_enabled,
+                                    },
+                                    |_| {},
+                                ) {
+                                    Ok(o) => println!(
+                                        "network      : pull 358633 -> ok ({} files)",
+                                        o.files_downloaded
+                                    ),
+                                    Err(e) => println!(
+                                        "network      : pull 358633 FAILED ({})",
+                                        e.message
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => println!("network      : client FAILED ({})", e.message),
+                }
+            }
+            _ => println!("network      : no session"),
+        }
+    }
+
     if std::env::args().any(|arg| arg == "--with-session") {
         let state = auth::AuthState::new();
         let status = state.status();
