@@ -110,13 +110,13 @@ BUNDLE="$(defaults read "$INSTALLED/Contents/Info.plist" CFBundleIdentifier)"
 # An ad-hoc signature gets a new CDHash on every build, and macOS then treats the
 # app as a stranger: Keychain access and external-volume access are re-asked every
 # single time. Re-sign with the stable Developer identity after installing.
-AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}')"
+AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}' || true)"
 if [ -z "$AUTHORITY" ]; then
   step "Re-signing with the stable Developer identity"
   codesign --force --deep --options runtime \
     --entitlements "$TAURI_DIR/entitlements.plist" \
     -s "$SIGNING_IDENTITY" "$INSTALLED"
-  AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}')"
+  AUTHORITY="$(codesign -dvv "$INSTALLED" 2>&1 | awk -F'=' '/^Authority/{print $2; exit}' || true)"
 fi
 [ -n "$AUTHORITY" ] || fail "app is still ad-hoc signed - permission prompts would return on every build"
 codesign --verify --deep --strict "$INSTALLED" 2>/dev/null || fail "code signature invalid"
