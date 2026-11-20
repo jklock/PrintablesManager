@@ -42,7 +42,7 @@
     ],
     "macOS": {
       "entitlements": "entitlements.plist",
-      "signingIdentity": "49C2A7CDD2C1C84BDE7F719CB4B359E61AF7227C"
+      "signingIdentity": "Developer ID Application: John Klockenkemper (7DJ75AWV5R)"
     }
   }
 }
