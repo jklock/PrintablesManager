@@ -92,3 +92,43 @@ probing and reading validation errors. Unknown arguments produce
 exist, so publishing a new model is: upload image → upload file → `modelUpdate`.
 The app can therefore create a model **locally** today (folder + metadata + git
 commit) and publish it once the upload handshake is wired to `modelUpdate`.
+
+## Correction — 2026-11-20 (live probes, authenticated)
+
+The documents quoted from the SPA bundle earlier in this file were **wrong**, and
+the API rejected them outright. Both facts were measured, not inferred:
+
+| Probe | Result |
+|---|---|
+| `$filename: Any!` | `HTTP 400` — `Unknown type 'Any'. Did you mean 'Int'?` |
+| `fileUpload { id }` | `HTTP 400` — `Cannot query field 'id' on type 'FileUploadType'` |
+| `printDelete($id: Any!)` | `HTTP 400` — `Unknown type 'Any'` |
+| `printDelete($id: ID!)` | `HTTP 200` — `{ ok: false, errors: [{ messages: ["No Print matches the given query."] }] }` |
+| `printFileUpload2(fileName: String!, folder: String!, unzip: Boolean!)` | `ok: true`, presigned GCS POST, `fileUpload { id }` |
+| POST to `uploadData.url` | `204` |
+| `printFileUploadFinished(fileUploadId: ID!)` | `ok: true`, `output { id filePath }` |
+| same handshake with `folder: "images"` | works — this is how a picture is uploaded |
+
+So the only upload handshake is `printFileUpload2` → POST → `printFileUploadFinished`,
+which `printables/write.rs` and `sync/push.rs` already used. `commands/publish.rs`
+now shares those types (`EditState`, `FileInput`, `RemoteWriter`) instead of
+duplicating a document that never existed.
+
+### Still blocked server-side
+
+`modelUpdate` on a **new** model answers, repeatedly and for minutes:
+
+```json
+{"field": "nonFieldError", "messages": ["Some File Uploads are not processed yet"]}
+```
+
+…even though both uploads returned `ok: true` with real `output.id`s (one valid
+binary STL, one 1×1 PNG, `folder: ""` and `folder: "images"`). The same call with
+empty lists returns the expected field validation instead, so the request shape is
+right and the blocker is the site's async file-processing worker.
+
+Measured consequence: **creating a new model on printables.com is not achievable
+from this client yet.** Editing and deleting existing models use the same typed
+documents and are unaffected. When the worker does finish, `publish()` will
+return `ok: true` without further changes.
+

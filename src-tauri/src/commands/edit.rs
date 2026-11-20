@@ -381,6 +381,20 @@ pub fn create_local_model(
     )
 }
 
+/// True for files the site shows as pictures rather than as printable files.
+/// printables.com will not create a model without at least one image, so an
+/// imported PNG must end up in `metadata.images`, never in `metadata.files`.
+fn is_image_name(name: &str) -> bool {
+    matches!(
+        Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif")
+    )
+}
+
 /// Copy explicit file paths into a model and register them. Shared by the
 /// folder picker and by the MCP server (which has no dialog).
 pub fn import_paths(
@@ -389,6 +403,7 @@ pub fn import_paths(
 ) -> AppResult<(Vec<String>, Vec<String>, MetadataV1)> {
     let files_dir = dir.join("files");
     fs::create_dir_all(&files_dir)?;
+    let images_dir = dir.join("images");
 
     let mut metadata = locator::read_metadata(dir)?;
     let mut imported = Vec::new();
@@ -402,6 +417,32 @@ pub fn import_paths(
             skipped.push(format!("{raw_name}: not a file"));
             continue;
         }
+
+        if is_image_name(&raw_name) {
+            fs::create_dir_all(&images_dir)?;
+            let target_name = unique_name(&images_dir, &raw_name);
+            let target = images_dir.join(&target_name);
+            match fs::copy(source, &target) {
+                Ok(_) => {
+                    // The first picture becomes the cover, the site's default.
+                    let kind = if metadata.images.is_empty() {
+                        "cover"
+                    } else {
+                        "photo"
+                    };
+                    metadata.images.push(crate::models::MetadataImage {
+                        name: target_name.clone(),
+                        kind: kind.into(),
+                        local_path: format!("images/{target_name}"),
+                        remote_id: None,
+                    });
+                    imported.push(target_name);
+                }
+                Err(err) => skipped.push(format!("{raw_name}: {err}")),
+            }
+            continue;
+        }
+
         let target_name = unique_name(&files_dir, &raw_name);
         let target = files_dir.join(&target_name);
         match fs::copy(source, &target) {
@@ -422,6 +463,7 @@ pub fn import_paths(
 
     if !imported.is_empty() {
         metadata.files.sort_by(|a, b| a.name.cmp(&b.name));
+        metadata.images.sort_by(|a, b| a.name.cmp(&b.name));
         locator::write_metadata(dir, &metadata)?;
         commit(
             dir,
@@ -631,6 +673,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("po-edit-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         assert_eq!(unique_name(&dir, "a:b/c?.stl"), "a_b_c_.stl");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn imported_pictures_are_registered_as_images_not_files() {
+        let dir = std::env::temp_dir().join(format!("po-edit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        crate::library::locator::write_metadata(&dir, &crate::library::locator::empty_metadata("1"))
+            .unwrap();
+
+        let src_dir = dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let png = src_dir.join("shot.png");
+        let stl = src_dir.join("part.stl");
+        fs::write(&png, b"png").unwrap();
+        fs::write(&stl, b"solid part").unwrap();
+
+        let (imported, skipped, meta) =
+            import_paths(&dir, &[png.clone(), stl.clone()]).expect("import");
+
+        assert!(skipped.is_empty(), "nothing should be skipped: {skipped:?}");
+        assert_eq!(imported.len(), 2);
+        // The picture belongs to images/ and the mesh to files/.
+        assert_eq!(meta.images.len(), 1);
+        assert_eq!(meta.images[0].name, "shot.png");
+        assert_eq!(meta.images[0].kind, "cover");
+        assert_eq!(meta.images[0].local_path, "images/shot.png");
+        assert_eq!(meta.files.len(), 1);
+        assert_eq!(meta.files[0].name, "part.stl");
+        assert!(dir.join("images/shot.png").is_file());
+        assert!(dir.join("files/part.stl").is_file());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
